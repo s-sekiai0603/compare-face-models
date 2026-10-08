@@ -1,2 +1,200 @@
 # verify_appearnce_reid
-外見識別の検証ツール
+
+人物の外見識別(reid)を検証するためのツールです。映像ファイルから外見画像を抽出し、後日モデルを切り替えた reid の結果比較（レポート出力）に使います。
+
+## 機能
+
+| 画面 | 内容 |
+|---|---|
+| トップ | 「画像抽出」「レポート出力」を選択 |
+| 外見画像抽出 | 映像一覧の表示、選択した映像から外見画像を抽出 |
+| 特徴量比較レポート出力 | 指定した画像または追跡IDと、比較対象フォルダ内の各追跡IDとの外見類似度をExcelレポートに出力 |
+
+- 「レポート出力」は特徴量比較レポート出力画面へ遷移します（下記「特徴量比較レポート出力」参照）。
+- 抽出処理は [premises-security](https://github.com/s-sekiai0603/premises-security) の「デバッグ画像抽出」と同等です
+  （YOLOv8-pose + BoT-SORT による追跡、`_body.jpg` / `_body_aligned.jpg` を出力）。
+
+## 動作環境
+
+- Windows / Python 3.10〜3.12
+- [uv](https://docs.astral.sh/uv/)
+- （GPU 利用時）NVIDIA GPU とドライバ
+  - CUDA 12.8 以上のドライバが必要です（Blackwell 世代 GPU は CUDA 12.8 以上が必須）。
+  - CUDA Toolkit / TensorRT 本体の個別インストールは不要です（`uv sync` で pip パッケージとして入ります）。
+
+## セットアップ（uv）
+
+```powershell
+# uv のインストール（未導入の場合）
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 依存関係のインストール（.venv が作成されます）
+uv sync
+
+# 起動（どちらでも可）
+uv run python -m verify_reid
+start.bat
+
+# テスト
+uv run pytest
+```
+
+`start.bat` は `.venv\Scripts\python.exe -m verify_reid` を実行します（事前に `uv sync` が必要）。
+
+### GPU / TensorRT の環境設定
+
+`pyproject.toml` で次を設定済みのため、`uv sync` だけで GPU 実行環境が整います。
+
+| 項目 | 設定 |
+|---|---|
+| PyTorch | CUDA 12.8 版（`https://download.pytorch.org/whl/cu128`）。`tool.uv.sources` / `tool.uv.index` で指定 |
+| TensorRT | `tensorrt-cu12>=10.8,<11`（10.x）。**11 系は `.engine` 変換時に `nvidia-modelopt` を要求し失敗するため使用しません** |
+| 変換用 | `onnx`、`onnxslim`（`.pt` → ONNX → `.engine` 変換に使用） |
+
+- 初回の `uv sync` は、PyTorch(CUDA版)・TensorRT のダウンロードで数分〜十数分かかることがあります。
+- GPU がない環境でも `uv sync` は通り、CPU で動作します（低速）。
+
+確認コマンド:
+
+```powershell
+.venv\Scripts\python.exe -c "import torch;print(torch.__version__, torch.cuda.is_available())"
+.venv\Scripts\python.exe -c "import tensorrt;print(tensorrt.__version__)"
+```
+
+### 実行環境の表示
+
+「抽出実行」でモデルを読み込むと、コンソールに実行環境が出力されます。
+
+```
+[推論環境] デバイス: GPU (cuda:0, NVIDIA ...) / フレームワーク: TensorRT / torch 2.11.0+cu128 / モデル: yolov8l-pose.engine
+```
+
+- デバイス: `GPU` または `CPU`
+- フレームワーク: `TensorRT`（`.engine` 使用時）または `PyTorch`（`.pt` 使用時）
+
+### モデル（YOLOv8-pose）
+
+初回の抽出実行時に `models/` へ自動で配置されます。
+
+- TensorRT が使える環境（GPU + `tensorrt` 導入済み）: ultralytics 標準の `yolov8l-pose.pt` をダウンロードし、`models/yolov8l-pose-b16.engine` に変換して使用します（初回のみ数分かかります。2回目以降は `.engine` をそのまま使用）。変換に失敗した場合は `.pt`（PyTorch）で実行します。
+- 使えない環境: `yolov8l-pose.pt` をダウンロードして PyTorch で実行します（GPU があれば GPU、なければ CPU）。
+- `.engine` はGPU・TensorRTバージョン依存です。環境を変えた場合は `models/yolov8l-pose-b16.engine` を削除すると再変換されます。
+- 変換時の中間ファイル `models/yolov8l-pose.onnx` は削除して構いません。
+
+## 使い方
+
+1. 起動して「画像抽出」を押す。
+2. 「映像ルートフォルダ」「外見画像出力先」を選択する（前回の指定が初期表示されます）。
+3. 一覧のチェックボックスで映像を選択（複数可。「全選択」「全解除」で一括操作）し、必要なら「抽出頻度(秒)」を変更して「抽出実行」を押す。
+   - 抽出頻度は、検出した人物(追跡ID)ごとに指定秒数ごとに画像を抽出します（既定 0.5 秒）。
+   - 抽出を実行したときの頻度が、次回画面を開いたときの既定値になります。
+
+### 入力フォルダ構成
+
+```
+ルートフォルダ\(ロケーション)\(カメラID)\(mp4形式映像ファイル)
+```
+
+ファイル名は `YYYYMMDDHH24MISS.mp4`（例: `20260311122723.mp4` → 2026/03/11 12:27:23）を想定します。
+
+### 出力フォルダ構成
+
+```
+出力先ルートフォルダ\(YYYYMMDDHH24MISS)\(カメラID)\(映像ファイル名・拡張子なし)\(追跡ID)\
+    {YYYYMMDD_HHMMSS_mmm}_body.jpg           ... 人物bboxの切り出し
+    {YYYYMMDD_HHMMSS_mmm}_body_aligned.jpg   ... 体軸回転補正後
+    {追跡ID}.json                            ... 骨格・人物信頼度
+```
+
+### JSON の内容
+
+追跡IDフォルダごとに 1 ファイル、画像ごとの配列で出力します。
+
+```json
+{
+  "track_id": 3,
+  "video_file": "20260311122723.mp4",
+  "location": "ロケーション名",
+  "images": [
+    {
+      "file_body": "..._body.jpg",
+      "file_body_aligned": "..._body_aligned.jpg",
+      "frame_index": 15,
+      "time_sec": 0.5,
+      "timestamp": "20260311_122723_500",
+      "bbox_xyxy": [x1, y1, x2, y2],
+      "person_conf": 0.91,
+      "keypoints": [{"x": 0.0, "y": 0.0, "conf": 0.0}]
+    }
+  ]
+}
+```
+
+- `person_conf`: YOLOv8-pose の人物検出信頼度
+- `keypoints`: YOLOv8-pose の 17 点（COCO 順）の座標と信頼度
+
+## 実装メモ
+
+- 骨格が不十分な検出は破棄します（足首・顔のそれぞれ最低1点、上半身8点のうち欠損4点未満、点の信頼度しきい値 0.35）。
+- 短辺 48px 未満の人物クロップは出力しません。
+- 設定は `~/.verify_appearance_reid/settings.json` に保存されます。
+
+## 処理の高速化（パイプライン）
+
+抽出処理は次の構成で高速化しています（`core/extractor.py`、`core/pose_detector.py`）。
+
+| 段 | 内容 |
+|---|---|
+| デコード先読み | 映像デコード専用スレッドが、64フレームまで先読みしてキューに積む（満杯なら待機） |
+| バッチ推論 | 16フレーム（`BATCH_SIZE`）ずつまとめて YOLOv8-pose で推論。TensorRT エンジンは最大バッチ16の動的バッチで変換 |
+| 追跡 | バッチ推論の結果を**フレーム順に1枚ずつ** BoT-SORT へ渡す（追跡結果は逐次処理と同一） |
+| 画像保存 | 回転補正と JPEG 保存を別スレッド（2本）で実行。JSON は全画像の保存完了後に出力 |
+
+- `BATCH_SIZE` を変える場合は `models/yolov8l-pose-b*.engine` が別名で再生成されます（初回のみ変換）。
+- 旧版の `models/yolov8l-pose.engine`（バッチ1固定）は使用されません。削除して構いません。
+
+## 特徴量比較レポート出力
+
+[premises-security](https://github.com/s-sekiai0603/premises-security) の `tools/out_report_compared_feature.py` と同様の画面で、クエリと比較対象の外見類似度を比較し Excel に出力します（外見のみ。顔・歩容は対象外）。
+
+### 画面
+
+| 項目 | 内容 |
+|---|---|
+| クエリ指定方法 | 「外見画像指定」（既定）／「追跡ID指定」 |
+| クエリ外見画像 | `_body.jpg` を D&D または「参照...」で指定（`_body_aligned.jpg` は不可） |
+| 追跡IDフォルダ | 追跡ID指定時に、追跡IDフォルダ（`{追跡ID}` フォルダ）を D&D または「参照...」で指定。検出件数を表示 |
+| 比較対象フォルダ | 外見画像出力先ルートと同じ構成のフォルダ（`日時\カメラID\映像名\追跡ID\...`）。既定は前回値 |
+| レポート出力先フォルダ | Excel の出力先。既定は前回値 |
+| 骨格描画 | ON でクエリ画像に骨格（json の keypoints）を描画 |
+| 特徴量抽出モデル | ラジオボタン。現在は「OSNet」のみ |
+| レポート作成開始 | レポートを `compared_feature_YYYYMMDD_HHMMSS.xlsx` として出力 |
+
+- 画面を開いた時点で、OSNet の重みが無ければ `models/osnet_x1_0.pth` へ自動ダウンロードします。取得できない場合は画面に配置手順が表示され、「レポート作成開始」は無効になります。
+  - 手動配置: [Model Zoo](https://kaiyangzhou.github.io/deep-person-reid/MODEL_ZOO) の osnet_x1_0（Market1501 / softmax）を `models/osnet_x1_0.pth` として配置してください。
+- クエリ自身（指定した画像、または追跡IDフォルダ内の全画像）は比較対象から除外されます。
+- 特徴量抽出には `_body_aligned.jpg`、Excel に貼る画像には `_body.jpg` を使います。
+
+### 処理と類似度
+
+- 特徴量: OSNet(osnet_x1_0) 512 次元、左右反転 TTA 平均、L2 正規化。デバイス/フレームワークはコンソールに出力します。
+- 類似度: コサイン類似度。同値（小数4桁）は同順位の標準競技順位。
+- 画像指定: クエリ1枚 × 比較対象全画像。追跡ID指定: クエリ全画像 × 比較対象全画像（全ペア）。
+- 追跡ID集約: 追跡IDごとに最大類似度の1件を残して再順位付け（max 集約）。
+
+### Excel の構成
+
+| シート | 内容 |
+|---|---|
+| 条件 | 生成日時、特徴量抽出モデル、クエリ/比較対象/出力先、各件数 |
+| 外見比較 | クエリ画像の下に、類似度降順（上位500件）を10列グリッドで表示 |
+| 外見比較(追跡ID集約) | 追跡IDごとに最大類似度の1件 |
+| ログ | レポート出力開始〜完了までの各フェーズの開始/終了時刻・所要時間・備考 |
+
+各画像の情報セルには、順位・類似度・**ロケーション名・カメラID・追跡ID・信頼度(人検出時)・映像ファイル**・撮影日時を表示します。画像の情報は、追跡IDフォルダの json（`location` / `video_file` / `person_conf`）とフォルダパスから識別します。ロケーション名は画像抽出時に json へ出力されるため、本機能の追加前に抽出した出力では「-」になります。
+
+「ログ」シートのフェーズ: 初期化・モデルロード / クエリ読込・特徴量抽出 / 比較対象スキャン / 比較対象 特徴量抽出 / 類似度計算・順位付け / Excel作成 / Excel保存。ログシートは保存後に追記して再保存するため、この再保存は記録対象外です。
+
+### 特徴量抽出モデルを追加するには
+
+`core/features/` に `FeatureExtractor`（`core/features/base.py`）を継承したクラスを作り、`@register` を付けて `core/features/__init__.py` で import します。レジストリ（`EXTRACTORS`）に登録されたモデルが、画面の「特徴量抽出モデル」のラジオボタンに自動で並びます。
