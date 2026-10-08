@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QSpinBox, QGridLayout, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QButtonGroup, QCheckBox, QDoubleSpinBox, QSpinBox, QGridLayout, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import Qt, Signal
@@ -94,6 +94,21 @@ class ReportScreen(QWidget):
         self.limit_spin.setSuffix(" 件（上位）")
         self.limit_spin.setValue(int(self.settings["report_limit"]))
         row.addWidget(self.limit_spin)
+        row.addStretch()
+        root.addLayout(row)
+
+        row = QHBoxLayout()
+        self.merge_label = self._label("特徴量マージ単位:")
+        row.addWidget(self.merge_label)
+        self.merge_spin = QDoubleSpinBox()
+        self.merge_spin.setRange(0.0, 86400.0)
+        self.merge_spin.setDecimals(1)
+        self.merge_spin.setSingleStep(0.5)
+        self.merge_spin.setSpecialValueText("指定なし")
+        self.merge_spin.setSuffix(" 秒")
+        self.merge_spin.setValue(float(self.settings["report_merge_sec"]))
+        row.addWidget(self.merge_spin)
+        row.addWidget(QLabel("（追跡ID指定時のみ。クエリ画像を時刻順に指定秒数ごとにグループ化して特徴量をマージ）"))
         row.addStretch()
         root.addLayout(row)
 
@@ -215,6 +230,8 @@ class ReportScreen(QWidget):
         self.track_edit.setEnabled(not image_mode)
         self.btn_track.setEnabled(not image_mode)
         self.track_info.setVisible(not image_mode)
+        self.merge_label.setEnabled(not image_mode)
+        self.merge_spin.setEnabled(not image_mode)
 
     def _set_query_image(self, path: str) -> None:
         p = Path(path)
@@ -330,7 +347,7 @@ class ReportScreen(QWidget):
             report_mode=MODE_IMAGE if image_mode else MODE_TRACK,
             report_query_path=self.query_edit.text(), report_track_dir=self.track_edit.text(),
             report_gallery_dir=self.gallery_edit.text(), report_output_dir=self.out_edit.text(),
-            report_skeleton=self.cb_skeleton.isChecked(), report_limit=self.limit_spin.value(),
+            report_skeleton=self.cb_skeleton.isChecked(), report_limit=self.limit_spin.value(), report_merge_sec=self.merge_spin.value(),
             report_targets=[[c.text().strip(), v.text().strip(), t.text().strip()]
                             for c, v, t in self.target_edits], report_model=self.selected_model())
         save_settings(self.settings)
@@ -338,7 +355,8 @@ class ReportScreen(QWidget):
             model_name=self.selected_model(), mode=MODE_IMAGE if image_mode else MODE_TRACK,
             query_path=Path(query), gallery_dir=Path(self.gallery_edit.text()),
             output_dir=Path(self.out_edit.text()), skeleton=self.cb_skeleton.isChecked(),
-            limit=self.limit_spin.value(), targets=self._targets())
+            limit=self.limit_spin.value(), targets=self._targets(),
+            merge_sec=0.0 if image_mode else self.merge_spin.value())
         self.worker.progress.connect(self.status.setText)
         self.worker.finished_ok.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)

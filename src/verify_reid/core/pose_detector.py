@@ -1,7 +1,7 @@
 """YOLOv8-pose による人物検出+骨格推定（人物検出と骨格を兼用）。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +21,9 @@ class PoseDetections:
     boxes: np.ndarray   # (N,4) xyxy
     scores: np.ndarray  # (N,)
     kpts: np.ndarray    # (N,17,3) x,y,conf
+    # ハードフィルタ前の全検出（別人の骨格が切り出し範囲に入っているかの判定用）
+    all_boxes: np.ndarray | None = field(default=None, repr=False)
+    all_kpts: np.ndarray | None = field(default=None, repr=False)
 
 
 def passes_hard_filter(kpt: np.ndarray) -> bool:
@@ -75,4 +78,4 @@ class PoseDetector:
         scores = res.boxes.conf.cpu().numpy().astype(np.float32)
         kpts = res.keypoints.data.cpu().numpy().astype(np.float32)
         keep = [i for i in range(len(boxes)) if passes_hard_filter(kpts[i])]
-        return PoseDetections(boxes[keep], scores[keep], kpts[keep])
+        return PoseDetections(boxes[keep], scores[keep], kpts[keep], boxes, kpts)

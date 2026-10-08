@@ -41,6 +41,9 @@ class GalleryEntry:
     video_file: str = "-"
     person_conf: float | None = None
     bbox_xyxy: list | None = None
+    time_sec: float | None = None   # 映像内経過秒（json）
+    invalid: bool = False           # 無効画像（別人の骨格を含む等）。比較に使わない
+    invalid_reason: str = ""
     keypoints: list | None = field(default=None, repr=False)
 
     @property
@@ -55,6 +58,18 @@ class GalleryEntry:
     def embed_path(self) -> Path:
         """特徴量抽出に使う画像（_body_aligned.jpg、無ければ _body.jpg）。"""
         return self.aligned_path or self.body_path
+
+
+def entry_seconds(e: GalleryEntry) -> float:
+    """画像の時刻(秒)。ファイル名の日時が読めればその時刻、無ければ映像内経過秒。"""
+    m = _TS_RE.match(e.ts)
+    if m:
+        try:
+            dt = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+            return dt.timestamp() + (int(m.group(3)) / 1000 if m.group(3) else 0.0)
+        except ValueError:
+            pass
+    return float(e.time_sec or 0.0)
 
 
 class _TrackMetaCache:
@@ -100,6 +115,9 @@ def _make_entry(body: Path, cache: _TrackMetaCache) -> GalleryEntry | None:
         video_file=meta.get("video_file") or f"{video_dir.name}.mp4",
         person_conf=im.get("person_conf"),
         bbox_xyxy=im.get("bbox_xyxy"),
+        time_sec=im.get("time_sec"),
+        invalid=bool(im.get("invalid", False)),
+        invalid_reason=im.get("invalid_reason") or "",
         keypoints=im.get("keypoints"),
     )
 

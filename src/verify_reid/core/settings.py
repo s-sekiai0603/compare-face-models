@@ -24,6 +24,7 @@ def load_settings(path: Path = SETTINGS_PATH) -> dict:
         "report_model": "OSNet",
         "report_limit": 500,
         "report_targets": [],
+        "report_merge_sec": 0.0,
     }
     if path == SETTINGS_PATH and not path.exists():
         path = LEGACY_SETTINGS_PATH  # 旧保存先からの引き継ぎ（次回保存時に新保存先へ書き出される）

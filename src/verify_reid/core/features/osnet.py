@@ -1,4 +1,4 @@
-"""OSNet(osnet_x1_0) による外見特徴量抽出（参照元 Osnet / preprocess_osnet_chw 相当）。"""
+"""OSNet 系(osnet_x1_0 / osnet_ain_x1_0) による外見特徴量抽出（参照元 Osnet / preprocess_osnet_chw 相当）。"""
 from __future__ import annotations
 
 import os
@@ -11,10 +11,6 @@ import numpy as np
 from .base import FeatureExtractor, WeightsUnavailable, register
 
 MODELS_DIR = Path(__file__).resolve().parents[4] / "models"
-WEIGHTS_ENV = "VERIFY_REID_OSNET_WEIGHTS"  # 重みパスの上書き（検証用）
-WEIGHTS_FILE = "osnet_x1_0.pth"
-# deep-person-reid Model Zoo: osnet_x1_0 (Market1501, softmax)
-GDRIVE_ID = "1vduhq5DpN2q1g4fYEZfPI17MJeh9qdrh"
 MODEL_ZOO_URL = "https://kaiyangzhou.github.io/deep-person-reid/MODEL_ZOO"
 INPUT_H, INPUT_W = 256, 128
 MIN_SHORT_SIDE = 48
@@ -23,21 +19,6 @@ MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
 EMBED_BATCH = 128
 TTA_HFLIP = True
-
-
-def weights_path() -> Path:
-    env = os.environ.get(WEIGHTS_ENV)
-    return Path(env) if env else MODELS_DIR / WEIGHTS_FILE
-
-
-def manual_instructions() -> str:
-    return (
-        "OSNet の重みを自動取得できませんでした。次の手順で手動配置してください。\n"
-        f"1. {MODEL_ZOO_URL} を開き、osnet_x1_0 (Market1501 / softmax) の重みをダウンロード\n"
-        f"2. ファイル名を {WEIGHTS_FILE} に変更し、次の場所に配置\n"
-        f"   {MODELS_DIR / WEIGHTS_FILE}\n"
-        "3. 画面を開き直す"
-    )
 
 
 def preprocess(img_bgr: np.ndarray) -> np.ndarray:
@@ -59,49 +40,68 @@ def preprocess(img_bgr: np.ndarray) -> np.ndarray:
     return ((rgb - MEAN) / STD).transpose(2, 0, 1)
 
 
-@register
-class OsnetExtractor(FeatureExtractor):
-    name = "OSNet"
+class _OsnetBase(FeatureExtractor):
+    """OSNet 系の共通実装。派生クラスは下の属性を定義するだけでよい。"""
+
+    arch = ""          # torchreid のモデル名
+    weights_file = ""  # models/ に置く重みファイル名
+    weights_env = ""   # 重みパスの上書き用環境変数（検証用）
+    gdrive_id = ""     # 自動取得に使う Google Drive ID
+    weights_hint = ""  # Model Zoo 上での重みの説明（手動配置の案内用）
+    num_classes = 751  # 分類層は特徴量抽出に使わない（形状不一致の層は読込時にスキップされる）
 
     def __init__(self):
         self.model = None
         self.device = "cpu"
 
+    def weights_path(self) -> Path:
+        env = os.environ.get(self.weights_env)
+        return Path(env) if env else MODELS_DIR / self.weights_file
+
+    def manual_instructions(self) -> str:
+        return (
+            f"{self.name} の重みを自動取得できませんでした。次の手順で手動配置してください。\n"
+            f"1. {MODEL_ZOO_URL} を開き、{self.arch} ({self.weights_hint}) の重みをダウンロード\n"
+            f"2. ファイル名を {self.weights_file} に変更し、次の場所に配置\n"
+            f"   {MODELS_DIR / self.weights_file}\n"
+            "3. 画面を開き直す"
+        )
+
     def weights_ready(self) -> bool:
-        return weights_path().is_file()
+        return self.weights_path().is_file()
 
     def download_weights(self, log: Callable[[str], None] = print) -> None:
-        dst = weights_path()
+        dst = self.weights_path()
         if dst.is_file():
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
-        log(f"OSNet の重みをダウンロードしています: {dst.name}")
+        log(f"{self.name} の重みをダウンロードしています: {dst.name}")
         try:
             import gdown
             tmp = dst.with_suffix(".part")
-            out = gdown.download(id=GDRIVE_ID, output=str(tmp), quiet=True)
+            out = gdown.download(id=self.gdrive_id, output=str(tmp), quiet=True)
             if not out or not tmp.is_file() or tmp.stat().st_size < 1_000_000:
                 raise RuntimeError("ダウンロード結果が不正です")
             tmp.replace(dst)
         except Exception as e:
-            raise WeightsUnavailable(f"{manual_instructions()}\n\n（自動取得エラー: {type(e).__name__}）") from e
+            raise WeightsUnavailable(f"{self.manual_instructions()}\n\n（自動取得エラー: {type(e).__name__}）") from e
 
     def load(self) -> None:
         if self.model is not None:
             return
         if not self.weights_ready():
-            raise WeightsUnavailable(manual_instructions())
+            raise WeightsUnavailable(self.manual_instructions())
         import torch
         import torchreid
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model = torchreid.models.build_model(name="osnet_x1_0", num_classes=751,
+        model = torchreid.models.build_model(name=self.arch, num_classes=self.num_classes,
                                              loss="softmax", pretrained=False)
-        torchreid.utils.load_pretrained_weights(model, str(weights_path()))
+        torchreid.utils.load_pretrained_weights(model, str(self.weights_path()))
         self.model = model.to(self.device).eval()
         dev = (f"GPU ({self.device}, {torch.cuda.get_device_name(0)})"
                if self.device != "cpu" else "CPU")
         print(f"[推論環境] 特徴量抽出: デバイス: {dev} / フレームワーク: PyTorch"
-              f" / torch {torch.__version__} / モデル: OSNet(osnet_x1_0)", flush=True)
+              f" / torch {torch.__version__} / モデル: {self.name}({self.arch})", flush=True)
 
     def embed_batch(self, images_bgr: list[np.ndarray]) -> np.ndarray:
         import torch
@@ -117,3 +117,24 @@ class OsnetExtractor(FeatureExtractor):
                 f = torch.nn.functional.normalize(f, dim=1)
                 feats.append(f.cpu().numpy().astype(np.float32))
         return np.concatenate(feats) if feats else np.zeros((0, 512), np.float32)
+
+
+@register
+class OsnetExtractor(_OsnetBase):
+    name = "OSNet"
+    arch = "osnet_x1_0"
+    weights_file = "osnet_x1_0.pth"
+    weights_env = "VERIFY_REID_OSNET_WEIGHTS"
+    gdrive_id = "1vduhq5DpN2q1g4fYEZfPI17MJeh9qdrh"  # Model Zoo: osnet_x1_0 (Market1501, softmax)
+    weights_hint = "Market1501 / softmax"
+
+
+@register
+class OsnetAinExtractor(_OsnetBase):
+    name = "OSNet-AIN"
+    arch = "osnet_ain_x1_0"
+    weights_file = "osnet_ain_x1_0.pth"
+    weights_env = "VERIFY_REID_OSNET_AIN_WEIGHTS"
+    # torchreid が osnet_ain_x1_0 の事前学習重みとして参照している ID（ImageNet 事前学習）
+    gdrive_id = "1-CaioD9NaqbHK_kzSMW8VE4_3KcsRjEo"
+    weights_hint = "ドメイン汎化向けの学習済み重み（MSMT17 等）"

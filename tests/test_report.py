@@ -144,3 +144,104 @@ def test_is_target_and_pink(tmp_path):
     assert ws["B5"].fill.fgColor.rgb == TARGET_FILL.fgColor.rgb
     cond_rows = {r[0]: r[1] for r in openpyxl.load_workbook(out)["条件"].iter_rows(values_only=True)}
     assert "Cam2" in cond_rows["探したい人物(ピンク表示)"]
+
+
+def test_registry_has_osnet_ain():
+    assert {"OSNet", "OSNet-AIN"} <= set(EXTRACTORS)
+    ain = EXTRACTORS["OSNet-AIN"]()
+    assert ain.arch == "osnet_ain_x1_0" and ain.weights_path().name == "osnet_ain_x1_0.pth"
+
+
+def test_assign_groups_fixed_windows_and_skip_empty():
+    from verify_reid.core.merge import assign_groups
+    # 先頭(0.0)起点で 2 秒ごと: [0,2) [2,4) [4,6) [6,8)。区間[2,4)は空なので飛ばして連番
+    assert assign_groups([0.0, 0.5, 1.9, 4.0, 5.9, 6.0], 2.0) == [1, 1, 1, 2, 2, 3]
+    assert assign_groups([], 1.0) == []
+
+
+def test_merge_embeddings_mean_and_normalized():
+    from verify_reid.core.merge import merge_embeddings
+    emb = np.array([[1, 0], [0, 1], [0, 1]], np.float32)
+    m = merge_embeddings(emb, [1, 1, 2])
+    assert m.shape == (2, 2)
+    assert np.allclose(np.linalg.norm(m, axis=1), 1.0)
+    assert np.allclose(m[0], [2 ** -0.5, 2 ** -0.5]) and np.allclose(m[1], [0, 1])
+
+
+def test_entry_seconds(tmp_path):
+    from verify_reid.core.gallery import entry_seconds
+    _make_track(tmp_path, "r", "C", "v", 1, ["20260311_122723_000", "20260311_122724_500"])
+    e = scan_gallery(tmp_path)
+    assert entry_seconds(e[1]) - entry_seconds(e[0]) == 1.5
+
+
+def test_report_shows_group_ids(tmp_path):
+    _make_track(tmp_path, "r", "C", "v", 1, ["20260311_122723_000", "20260311_122730_000"])
+    _make_track(tmp_path, "r", "C", "v", 2, ["20260311_122800_000"])
+    allx = scan_gallery(tmp_path)
+    queries, gallery = allx[:2], allx[2:]
+    sim = np.array([[0.9], [0.1]], np.float32)  # 本来はグループ数分の行。ここでは2グループ
+    cond = ReportConditions("OSNet", MODE_IMAGE, "q", "g", "o", False, datetime.now(), 500, None, 5.0)
+    out = tmp_path / "g.xlsx"
+    build_report(out, cond, queries, gallery, rank_pairs(sim), aggregate_by_track(sim, ["k"]),
+                 PhaseLogger(echo=lambda m: None), group_ids=[1, 2])
+    ws = openpyxl.load_workbook(out)["外見比較"]
+    assert "クエリグループID:G1" in ws["A1"].value and "クエリグループID:G2" in ws["B1"].value
+    assert "ヒットしたクエリグループID:G1" in ws["A4"].value  # 最も類似したのは G1
+    rows = {r[0]: r[1] for r in openpyxl.load_workbook(out)["条件"].iter_rows(values_only=True)}
+    assert "5" in rows["特徴量マージ単位(秒)"] and "2" in rows["特徴量マージ単位(秒)"]
+
+
+def test_foreign_skeleton_reason():
+    from verify_reid.core.validity import foreign_skeleton_reason
+    def person(x0):  # 17点を x0..x0+16, y=10 に並べる
+        k = np.zeros((17, 3), np.float32)
+        k[:, 0] = np.arange(17) + x0; k[:, 1] = 10; k[:, 2] = 0.9
+        return k
+    own = np.array([0, 0, 20, 50], np.float32)
+    boxes = np.array([own, [100, 0, 120, 50]], np.float32)
+    kp = np.stack([person(0), person(100)])
+    assert foreign_skeleton_reason(own, boxes, kp, (0, 0, 20, 50)) is None        # 自分自身のみ
+    kp2 = np.stack([person(0), person(10)])                                         # 他人物の点が範囲内に入る
+    r = foreign_skeleton_reason(own, np.array([own, [10, 0, 30, 50]], np.float32), kp2, (0, 0, 20, 50))
+    assert r and "別人の骨格" in r
+    assert foreign_skeleton_reason(own, None, None, (0, 0, 20, 50)) is None
+
+
+def _write_invalid(d, ts, reason="別人の骨格を含む（テスト）"):
+    import json
+    jp = next(d.glob("*.json")); data = json.loads(jp.read_text(encoding="utf-8"))
+    for im in data["images"]:
+        if im["file_body"].startswith(ts):
+            im["invalid"] = True; im["invalid_reason"] = reason
+    jp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_gallery_reads_invalid_flag(tmp_path):
+    d = _make_track(tmp_path, "r", "C", "v", 1, ["20260311_122723_000", "20260311_122724_000"])
+    _write_invalid(d, "20260311_122724_000")
+    e = scan_gallery(tmp_path)
+    assert [x.invalid for x in e] == [False, True] and e[1].invalid_reason.startswith("別人")
+
+
+def test_invalid_query_gray_and_excluded(tmp_path):
+    from verify_reid.core.report_excel import INVALID_FILL
+    d = _make_track(tmp_path, "r", "C", "v", 1, ["20260311_122723_000", "20260311_122724_000"])
+    _write_invalid(d, "20260311_122723_000")
+    _make_track(tmp_path, "r", "C", "v", 2, ["20260311_122800_000"])
+    allx = scan_gallery(tmp_path)
+    queries, gallery = allx[:2], allx[2:]
+    used = [q for q in queries if not q.invalid]
+    sim = np.array([[0.9]], np.float32)
+    cond = ReportConditions("OSNet", MODE_IMAGE, "q", "g", "o", False, datetime.now(), 500, None, 5.0)
+    out = tmp_path / "i.xlsx"
+    build_report(out, cond, queries, gallery, rank_pairs(sim), aggregate_by_track(sim, ["k"]),
+                 PhaseLogger(echo=lambda m: None), group_ids=[None, 1], used_queries=used)
+    wb = openpyxl.load_workbook(out); ws = wb["外見比較"]
+    assert "【無効画像】" in ws["A1"].value and "別人の骨格を含む（テスト）" in ws["A1"].value
+    assert "グループID" not in ws["A1"].value and "クエリグループID:G1" in ws["B1"].value
+    assert ws["A1"].fill.fgColor.rgb == INVALID_FILL.fgColor.rgb
+    assert ws["A2"].fill.fgColor.rgb == INVALID_FILL.fgColor.rgb       # 画像セルも
+    assert ws["B1"].fill.fgColor.rgb != INVALID_FILL.fgColor.rgb
+    rows = {r[0]: r[1] for r in wb["条件"].iter_rows(values_only=True)}
+    assert rows["クエリ無効画像数（比較に不使用）"] == 1

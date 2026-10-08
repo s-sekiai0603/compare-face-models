@@ -18,10 +18,11 @@ from .similarity import Pair, competition_ranks
 
 GRID_COLS = 10
 COL_PX = 165
-INFO_ROW_PX = 120
+INFO_ROW_PX = 150
 IMG_ROW_PX = 200
 IMG_PAD = 4
 QUERY_FILL = PatternFill("solid", fgColor="FFD9EAD3")
+INVALID_FILL = PatternFill("solid", fgColor="FFBFBFBF")  # 無効画像（グレー）
 TARGET_FILL = PatternFill("solid", fgColor="FFFFC0CB")  # 探したい人物（ピンク）
 MAX_TARGETS = 10
 
@@ -43,6 +44,7 @@ class ReportConditions:
     generated_at: datetime
     limit: int = 500
     targets: list | None = None  # [(カメラID, 映像ファイル名, 追跡ID), ...]
+    merge_sec: float = 0.0       # 追跡ID指定時の特徴量マージ単位秒（0=マージしない）
 
 
 def _norm_video(name: str) -> str:
@@ -82,6 +84,8 @@ def _info_text(e: GalleryEntry, head: str, sim: float | None = None, extra: str 
     lines = [head + (f" sim={sim:.4f}" if sim is not None else "")]
     if extra:
         lines.append(extra)
+    if e.invalid:
+        lines += ["【無効画像】特徴量比較に未使用", f"無効理由:{e.invalid_reason or '-'}"]
     lines += [
         f"Loc:{e.location} / Cam:{e.camera_id}",
         f"Track:{e.track_id} / 信頼度:{_fmt_conf(e.person_conf)}",
@@ -160,7 +164,7 @@ def _grid_rows(n: int) -> int:
 
 
 def _build_conditions(ws, cond: ReportConditions, n_query: int, n_gallery: int,
-                      n_tracks: int, n_out: int) -> None:
+                      n_tracks: int, n_out: int, n_groups: int = 0, n_invalid_query: int = 0) -> None:
     ws.column_dimensions["A"].width = 28
     ws.column_dimensions["B"].width = 90
     query_label = "クエリ外見画像" if cond.mode == MODE_IMAGE else "クエリ追跡IDフォルダ"
@@ -177,6 +181,9 @@ def _build_conditions(ws, cond: ReportConditions, n_query: int, n_gallery: int,
             f"カメラID:{c or '-'} / 映像:{v or '-'} / 追跡ID:{t or '-'}"
             for c, v, t in (cond.targets or []) if c or v or t) or "指定なし"),
         ("クエリ画像数", n_query),
+        ("クエリ無効画像数（比較に不使用）", n_invalid_query),
+        ("特徴量マージ単位(秒)", (f"{cond.merge_sec:g}（クエリグループ数: {n_groups}）"
+                              if cond.merge_sec > 0 else "指定なし")),
         ("比較対象 画像数", n_gallery),
         ("比較対象 追跡ID数", n_tracks),
         ("外見比較シート 出力件数", n_out),
@@ -187,15 +194,26 @@ def _build_conditions(ws, cond: ReportConditions, n_query: int, n_gallery: int,
 
 
 def _build_compare_sheet(ws, mode: str, queries: list[GalleryEntry], gallery: list[GalleryEntry],
-                         pairs: list[Pair], skeleton: bool, targets=None) -> None:
+                         pairs: list[Pair], skeleton: bool, targets=None,
+                         group_ids: list[int | None] | None = None,
+                         used_queries: list[GalleryEntry] | None = None) -> None:
+    """queries=表示する全クエリ画像(無効含む)。pair.q_idx は used_queries(無効を除く)または
+    グループ(ID-1)を指す。group_ids は queries と同順で、無効画像は None。"""
+    used_queries = queries if used_queries is None else used_queries
     _setup_grid(ws)
     for i, q in enumerate(queries):
-        _write_cell(ws, 1, i, q, _info_text(q, "クエリ"), skeleton=skeleton, fill=QUERY_FILL)
+        gid = group_ids[i] if group_ids else None
+        gtext = f"クエリグループID:G{gid}" if gid else ""
+        _write_cell(ws, 1, i, q, _info_text(q, "クエリ", extra=gtext), skeleton=skeleton,
+                    fill=INVALID_FILL if q.invalid else QUERY_FILL)
     start = 1 + _grid_rows(len(queries)) + 1  # 1行空ける
     ranks = competition_ranks([p.sim for p in pairs])
     for i, (p, rank) in enumerate(zip(pairs, ranks)):
         g = gallery[p.g_idx]
-        extra = f"Query:{queries[p.q_idx].captured_text}" if mode == MODE_TRACK else ""
+        if group_ids is not None:  # マージ時は pair.q_idx がグループ(ID-1)を指す
+            extra = f"ヒットしたクエリグループID:G{p.q_idx + 1}"
+        else:
+            extra = f"Query:{used_queries[p.q_idx].captured_text}" if mode == MODE_TRACK else ""
         _write_cell(ws, start, i, g, _info_text(g, f"{rank}位", p.sim, extra),
                     fill=TARGET_FILL if is_target(g, targets) else None)
 
@@ -230,17 +248,21 @@ def _build_log_sheet(ws, log: PhaseLogger, note: str = "") -> None:
 
 def build_report(path: Path, cond: ReportConditions, queries: list[GalleryEntry],
                  gallery: list[GalleryEntry], ranked: list[Pair], aggregated: list[Pair],
-                 log: PhaseLogger) -> None:
+                 log: PhaseLogger, group_ids: list[int | None] | None = None,
+                 used_queries: list[GalleryEntry] | None = None) -> None:
     """レポートを作成して保存する。ログシートは全フェーズ終了後に追記して再保存する。"""
     wb = Workbook()
     ws_cond = wb.active
     ws_cond.title = "条件"
     n_tracks = len({g.track_key for g in gallery})
-    _build_conditions(ws_cond, cond, len(queries), len(gallery), n_tracks, len(ranked))
+    _build_conditions(ws_cond, cond, len(queries), len(gallery), n_tracks, len(ranked),
+                      max((g for g in (group_ids or []) if g), default=0),
+                      sum(1 for q in queries if q.invalid))
     with log.phase("Excel作成（シート生成・画像配置）"):
-        _build_compare_sheet(wb.create_sheet("外見比較"), cond.mode, queries, gallery, ranked, cond.skeleton, cond.targets)
+        _build_compare_sheet(wb.create_sheet("外見比較"), cond.mode, queries, gallery, ranked, cond.skeleton, cond.targets, group_ids,
+                             used_queries)
         _build_compare_sheet(wb.create_sheet("外見比較(追跡ID集約)"), cond.mode, queries, gallery,
-                             aggregated, cond.skeleton, cond.targets)
+                             aggregated, cond.skeleton, cond.targets, group_ids, used_queries)
     with log.phase("Excel保存"):
         path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(path)

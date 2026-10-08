@@ -14,6 +14,7 @@ import cv2
 from .body_align import align_person_crop
 from .botsort_tracker import PersonTracker
 from .pose_detector import BATCH_SIZE, PoseDetector
+from .validity import foreign_skeleton_reason
 from .video_scanner import parse_capture_datetime
 
 MIN_CROP_SIDE = 48
@@ -29,6 +30,7 @@ class ExtractResult:
     out_dir: Path
     track_count: int = 0
     image_count: int = 0
+    invalid_count: int = 0
     cancelled: bool = False
 
 
@@ -179,6 +181,8 @@ def extract_video(
                     if x2 <= x1 or y2 <= y1 or min(x2 - x1, y2 - y1) < MIN_CROP_SIDE:
                         continue
                     ts = make_timestamp(start_dt, fi, fps)
+                    reason = foreign_skeleton_reason(p.bbox_xyxy, det.all_boxes, det.all_kpts,
+                                                     (x1, y1, x2, y2))
                     f_body, f_aligned = f"{ts}_body.jpg", f"{ts}_body_aligned.jpg"
                     writer.submit(out_dir / str(p.track_id), f_body, f_aligned,
                                   frame[y1:y2, x1:x2], p.kpts)
@@ -191,6 +195,8 @@ def extract_video(
                         "timestamp": ts,
                         "bbox_xyxy": [x1, y1, x2, y2],
                         "person_conf": round(p.score, 4),
+                        "invalid": reason is not None,
+                        "invalid_reason": reason or "",
                         "keypoints": [{"x": round(float(x), 2), "y": round(float(y), 2),
                                        "conf": round(float(c), 4)} for x, y, c in p.kpts],
                     })
@@ -217,6 +223,7 @@ def extract_video(
     if writer.error:
         raise writer.error
     result.track_count = len(records)
+    result.invalid_count = sum(1 for imgs in records.values() for im in imgs if im["invalid"])
     if progress:
         progress(total, total)
     return result

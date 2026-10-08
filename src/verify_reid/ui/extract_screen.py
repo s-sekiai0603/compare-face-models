@@ -159,7 +159,8 @@ class ExtractScreen(QWidget):
         self.bar.setValue(100 if not cancelled else self.bar.value())
         QMessageBox.information(
             self, "画像抽出", f"{'キャンセルしました' if cancelled else '完了しました'}\n"
-            f"映像: {len(results)} 本 / 追跡ID: {tracks} / 画像: {images} 枚\n出力先: {out_dir}")
+            f"映像: {len(results)} 本 / 追跡ID: {tracks} / 画像: {images} 枚"
+            f"（うち無効 {sum(r.invalid_count for r in results)} 枚）\n出力先: {out_dir}")
 
     def _on_failed(self, msg: str) -> None:
         self._set_running(False)
