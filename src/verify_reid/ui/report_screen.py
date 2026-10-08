@@ -4,18 +4,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QSpinBox, QGridLayout, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget,
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 
 from ..core.features import EXTRACTORS
 from ..core.gallery import scan_track_folder
-from ..core.report_excel import MODE_IMAGE, MODE_TRACK
+from ..core.report_excel import MAX_TARGETS, MODE_IMAGE, MODE_TRACK
 from ..core.settings import load_settings, save_settings
 from .report_worker import ReportWorker, WeightsWorker
 
 LABEL_WIDTH = 140
+TARGET_VISIBLE_ROWS = 5  # 探したい人物欄で最初から表示する行数（残りはスクロール）
 
 
 class DropLineEdit(QLineEdit):
@@ -85,6 +86,60 @@ class ReportScreen(QWidget):
         self.cb_skeleton = QCheckBox("骨格描画")
         self.cb_skeleton.setChecked(bool(self.settings["report_skeleton"]))
         root.addWidget(self.cb_skeleton)
+
+        row = QHBoxLayout()
+        row.addWidget(self._label("レポート出力件数:"))
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(1, 100000)
+        self.limit_spin.setSuffix(" 件（上位）")
+        self.limit_spin.setValue(int(self.settings["report_limit"]))
+        row.addWidget(self.limit_spin)
+        row.addStretch()
+        root.addLayout(row)
+
+        # 探したい人物（該当画像をレポートでピンク表示）。5件分を表示し、残りは縦スクロール
+        tbox = QGroupBox(f"探したい人物（最大{MAX_TARGETS}件・該当画像をピンク表示）")
+        tlay = QVBoxLayout(tbox)
+        head = QHBoxLayout()
+        head.addStretch()
+        btn_clear_all = QPushButton("全クリア")
+        btn_clear_all.clicked.connect(self._clear_all_targets)
+        head.addWidget(btn_clear_all)
+        tlay.addLayout(head)
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        grid.setContentsMargins(0, 0, 0, 0)
+        for c, h in enumerate(("", "カメラID", "映像ファイル名", "追跡ID", "")):
+            grid.addWidget(QLabel(h), 0, c)
+        saved_targets = list(self.settings["report_targets"])
+        self.target_edits: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
+        for i in range(MAX_TARGETS):
+            cam, vid, trk = QLineEdit(), QLineEdit(), QLineEdit()
+            cam.setPlaceholderText("例: Cam1")
+            vid.setPlaceholderText("例: 20260311122723.mp4")
+            trk.setPlaceholderText("例: 3")
+            if i < len(saved_targets) and len(saved_targets[i]) == 3:
+                cam.setText(saved_targets[i][0]); vid.setText(saved_targets[i][1]); trk.setText(saved_targets[i][2])
+            cam.editingFinished.connect(lambda k=i: self._split_pipe_values(k))  # フォーカス移動/Enterで確定
+            btn = QPushButton("クリア")
+            btn.clicked.connect(lambda _=False, k=i: self._clear_target_row(k))
+            grid.addWidget(QLabel(f"{i + 1}"), i + 1, 0)
+            for c, ed in enumerate((cam, vid, trk), start=1):
+                grid.addWidget(ed, i + 1, c)
+            grid.addWidget(btn, i + 1, 4)
+            self.target_edits.append((cam, vid, trk))
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 2)
+        grid.setColumnStretch(3, 1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        row_h = grid.itemAtPosition(1, 1).widget().sizeHint().height() + grid.verticalSpacing()
+        header_h = grid.itemAtPosition(0, 1).widget().sizeHint().height() + grid.verticalSpacing()
+        scroll.setFixedHeight(header_h + row_h * TARGET_VISIBLE_ROWS + 2 * scroll.frameWidth() + 2)
+        tlay.addWidget(scroll)
+        root.addWidget(tbox)
 
         # 特徴量抽出モデル（将来はレジストリへの登録でラジオが増える）
         box = QGroupBox("特徴量抽出モデル")
@@ -231,6 +286,36 @@ class ReportScreen(QWidget):
         self.guide.setPlainText(msg)
         self.guide.show()
 
+    def _split_pipe_values(self, index: int) -> None:
+        """カメラID欄に「|」区切りで入力された値を、カメラID|映像ファイル名|追跡ID に振り分ける。"""
+        cam, vid, trk = self.target_edits[index]
+        text = cam.text()
+        if "|" not in text:
+            return
+        parts = [p.strip() for p in text.split("|")]
+        cam.setText(parts[0])
+        if len(parts) > 1:
+            vid.setText(parts[1])
+        if len(parts) > 2:
+            trk.setText(parts[2])
+
+    def _clear_target_row(self, index: int) -> None:
+        for ed in self.target_edits[index]:
+            ed.clear()
+
+    def _clear_all_targets(self) -> None:
+        for i in range(len(self.target_edits)):
+            self._clear_target_row(i)
+
+    def _targets(self) -> list[tuple[str, str, str]]:
+        """入力のある行だけを (カメラID, 映像ファイル名, 追跡ID) で返す。"""
+        out = []
+        for cam, vid, trk in self.target_edits:
+            row = (cam.text().strip(), vid.text().strip(), trk.text().strip())
+            if any(row):
+                out.append(row)
+        return out
+
     # ---- レポート作成 ----
     def _on_start(self) -> None:
         image_mode = self.rb_image.isChecked()
@@ -245,12 +330,15 @@ class ReportScreen(QWidget):
             report_mode=MODE_IMAGE if image_mode else MODE_TRACK,
             report_query_path=self.query_edit.text(), report_track_dir=self.track_edit.text(),
             report_gallery_dir=self.gallery_edit.text(), report_output_dir=self.out_edit.text(),
-            report_skeleton=self.cb_skeleton.isChecked(), report_model=self.selected_model())
+            report_skeleton=self.cb_skeleton.isChecked(), report_limit=self.limit_spin.value(),
+            report_targets=[[c.text().strip(), v.text().strip(), t.text().strip()]
+                            for c, v, t in self.target_edits], report_model=self.selected_model())
         save_settings(self.settings)
         self.worker = ReportWorker(
             model_name=self.selected_model(), mode=MODE_IMAGE if image_mode else MODE_TRACK,
             query_path=Path(query), gallery_dir=Path(self.gallery_edit.text()),
-            output_dir=Path(self.out_edit.text()), skeleton=self.cb_skeleton.isChecked())
+            output_dir=Path(self.out_edit.text()), skeleton=self.cb_skeleton.isChecked(),
+            limit=self.limit_spin.value(), targets=self._targets())
         self.worker.progress.connect(self.status.setText)
         self.worker.finished_ok.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)

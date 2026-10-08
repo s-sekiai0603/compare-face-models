@@ -113,3 +113,34 @@ def test_build_report_sheets(tmp_path):
     assert "Loc:本社" in text and "信頼度:0.900" in text and "映像:v.mp4" in text
     names = [r[1] for r in wb["ログ"].iter_rows(min_row=3, values_only=True)]
     assert any("Excel保存" in n for n in names)
+
+
+def test_limit_applies_and_setting_default():
+    from verify_reid.core.settings import load_settings
+    sim = np.arange(10, dtype=np.float32).reshape(1, 10) / 10
+    assert len(rank_pairs(sim, 3)) == 3
+    assert len(aggregate_by_track(sim, list(range(10)), 4)) == 4
+    assert load_settings(path=__import__("pathlib").Path("none.json"))["report_limit"] == 500
+
+
+def test_is_target_and_pink(tmp_path):
+    from verify_reid.core.report_excel import TARGET_FILL, is_target
+    _make_track(tmp_path, "r", "Cam1", "v", 1, ["20260311_122723_000"])
+    _make_track(tmp_path, "r", "Cam2", "v", 2, ["20260311_122724_000"])
+    g = scan_gallery(tmp_path)
+    assert is_target(g[0], [("Cam1", "v.mp4", "1")])
+    assert is_target(g[0], [("Cam1", "v", "")])            # 拡張子なし・空欄は不問
+    assert not is_target(g[0], [("Cam2", "v.mp4", "1")])
+    assert not is_target(g[0], [("", "", "")]) and not is_target(g[0], [])
+    sim = np.array([[1.0, 0.5]], np.float32)
+    cond = ReportConditions("OSNet", MODE_IMAGE, "q", "g", "o", False, datetime.now(), 500, [("Cam2", "", "2")])
+    out = tmp_path / "t.xlsx"
+    build_report(out, cond, g[:1], g, rank_pairs(sim), aggregate_by_track(sim, [x.track_key for x in g]),
+                 PhaseLogger(echo=lambda m: None))
+    ws = openpyxl.load_workbook(out)["外見比較"]
+    # 行1-2: クエリ。行4(情報)/5(画像)に順位1(Cam1)・列B=順位2(Cam2)
+    assert ws["A4"].fill.fgColor.rgb != TARGET_FILL.fgColor.rgb
+    assert ws["B4"].fill.fgColor.rgb == TARGET_FILL.fgColor.rgb
+    assert ws["B5"].fill.fgColor.rgb == TARGET_FILL.fgColor.rgb
+    cond_rows = {r[0]: r[1] for r in openpyxl.load_workbook(out)["条件"].iter_rows(values_only=True)}
+    assert "Cam2" in cond_rows["探したい人物(ピンク表示)"]

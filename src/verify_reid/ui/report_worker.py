@@ -34,7 +34,7 @@ def embed_entries(extractor, entries: list[GalleryEntry], progress=None) -> np.n
 
 
 def run_report(model_name: str, mode: str, query_path: Path, gallery_dir: Path, output_dir: Path,
-               skeleton: bool, progress=lambda s: None, echo=print) -> tuple[Path, PhaseLogger]:
+               skeleton: bool, limit: int = 500, targets=None, progress=lambda s: None, echo=print) -> tuple[Path, PhaseLogger]:
     log = PhaseLogger(echo=lambda m: (echo(m), progress(m)))
     generated = datetime.now()
     with log.phase(f"初期化・モデルロード（{model_name}）"):
@@ -62,11 +62,11 @@ def run_report(model_name: str, mode: str, query_path: Path, gallery_dir: Path, 
         rec.note = f"{len(gallery)} 枚"
     with log.phase("類似度計算・順位付け") as rec:
         sim = similarity_matrix(q_emb, g_emb)
-        ranked = rank_pairs(sim)
-        aggregated = aggregate_by_track(sim, [g.track_key for g in gallery])
+        ranked = rank_pairs(sim, limit)
+        aggregated = aggregate_by_track(sim, [g.track_key for g in gallery], limit)
         rec.note = f"全ペア {sim.size} 件 / 出力 {len(ranked)} 件 / 追跡ID集約 {len(aggregated)} 件"
     cond = ReportConditions(model_name, mode, str(query_path), str(gallery_dir), str(output_dir),
-                            skeleton, generated)
+                            skeleton, generated, limit, targets)
     out = output_dir / f"compared_feature_{generated:%Y%m%d_%H%M%S}.xlsx"
     build_report(out, cond, queries, gallery, ranked, aggregated, log)
     return out, log

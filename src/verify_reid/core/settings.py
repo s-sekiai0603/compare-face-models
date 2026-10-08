@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 DEFAULT_INTERVAL_SEC = 0.5
-SETTINGS_PATH = Path.home() / ".verify_appearance_reid" / "settings.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]  # ワークスペースのルートフォルダ
+SETTINGS_PATH = PROJECT_ROOT / "settings.json"
+LEGACY_SETTINGS_PATH = Path.home() / ".verify_appearance_reid" / "settings.json"
 
 
 def load_settings(path: Path = SETTINGS_PATH) -> dict:
@@ -20,7 +22,11 @@ def load_settings(path: Path = SETTINGS_PATH) -> dict:
         "report_output_dir": "",
         "report_skeleton": False,
         "report_model": "OSNet",
+        "report_limit": 500,
+        "report_targets": [],
     }
+    if path == SETTINGS_PATH and not path.exists():
+        path = LEGACY_SETTINGS_PATH  # 旧保存先からの引き継ぎ（次回保存時に新保存先へ書き出される）
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):

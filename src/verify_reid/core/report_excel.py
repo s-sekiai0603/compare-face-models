@@ -22,6 +22,8 @@ INFO_ROW_PX = 120
 IMG_ROW_PX = 200
 IMG_PAD = 4
 QUERY_FILL = PatternFill("solid", fgColor="FFD9EAD3")
+TARGET_FILL = PatternFill("solid", fgColor="FFFFC0CB")  # 探したい人物（ピンク）
+MAX_TARGETS = 10
 
 MODE_IMAGE = "外見画像指定"
 MODE_TRACK = "追跡ID指定"
@@ -39,6 +41,29 @@ class ReportConditions:
     output_dir: str
     skeleton: bool
     generated_at: datetime
+    limit: int = 500
+    targets: list | None = None  # [(カメラID, 映像ファイル名, 追跡ID), ...]
+
+
+def _norm_video(name: str) -> str:
+    n = name.strip().lower()
+    return n[:-4] if n.endswith(".mp4") else n
+
+
+def is_target(e: GalleryEntry, targets) -> bool:
+    """指定された (カメラID, 映像ファイル名, 追跡ID) のいずれかに合致するか。
+    入力のある項目だけで照合する（空欄は不問）。映像ファイル名は拡張子の有無を問わない。"""
+    for cam, video, track in targets or []:
+        if not (cam or video or track):
+            continue
+        if cam and e.camera_id != cam.strip():
+            continue
+        if video and _norm_video(e.video_file) != _norm_video(video):
+            continue
+        if track and e.track_id != track.strip():
+            continue
+        return True
+    return False
 
 
 def _px_to_width(px: int) -> float:
@@ -121,8 +146,10 @@ def _write_cell(ws, start_row: int, pos: int, e: GalleryEntry, text: str,
     info = ws.cell(row=row, column=col, value=text)
     info.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
     info.font = Font(size=9)
+    img_cell = ws.cell(row=row + 1, column=col)
     if fill:
         info.fill = fill
+        img_cell.fill = fill  # 画像セルの背景も同色にする
     ws.row_dimensions[row].height = _px_to_pt(INFO_ROW_PX)
     ws.row_dimensions[row + 1].height = _px_to_pt(IMG_ROW_PX)
     _place_image(ws, f"{get_column_letter(col)}{row + 1}", e, skeleton)
@@ -145,6 +172,10 @@ def _build_conditions(ws, cond: ReportConditions, n_query: int, n_gallery: int,
         ("比較対象フォルダ", cond.gallery_dir),
         ("レポート出力先フォルダ", cond.output_dir),
         ("骨格描画", "ON" if cond.skeleton else "OFF"),
+        ("レポート出力件数(上位)", cond.limit),
+        ("探したい人物(ピンク表示)", "\n".join(
+            f"カメラID:{c or '-'} / 映像:{v or '-'} / 追跡ID:{t or '-'}"
+            for c, v, t in (cond.targets or []) if c or v or t) or "指定なし"),
         ("クエリ画像数", n_query),
         ("比較対象 画像数", n_gallery),
         ("比較対象 追跡ID数", n_tracks),
@@ -156,7 +187,7 @@ def _build_conditions(ws, cond: ReportConditions, n_query: int, n_gallery: int,
 
 
 def _build_compare_sheet(ws, mode: str, queries: list[GalleryEntry], gallery: list[GalleryEntry],
-                         pairs: list[Pair], skeleton: bool) -> None:
+                         pairs: list[Pair], skeleton: bool, targets=None) -> None:
     _setup_grid(ws)
     for i, q in enumerate(queries):
         _write_cell(ws, 1, i, q, _info_text(q, "クエリ"), skeleton=skeleton, fill=QUERY_FILL)
@@ -165,7 +196,8 @@ def _build_compare_sheet(ws, mode: str, queries: list[GalleryEntry], gallery: li
     for i, (p, rank) in enumerate(zip(pairs, ranks)):
         g = gallery[p.g_idx]
         extra = f"Query:{queries[p.q_idx].captured_text}" if mode == MODE_TRACK else ""
-        _write_cell(ws, start, i, g, _info_text(g, f"{rank}位", p.sim, extra))
+        _write_cell(ws, start, i, g, _info_text(g, f"{rank}位", p.sim, extra),
+                    fill=TARGET_FILL if is_target(g, targets) else None)
 
 
 def _build_log_sheet(ws, log: PhaseLogger, note: str = "") -> None:
@@ -206,9 +238,9 @@ def build_report(path: Path, cond: ReportConditions, queries: list[GalleryEntry]
     n_tracks = len({g.track_key for g in gallery})
     _build_conditions(ws_cond, cond, len(queries), len(gallery), n_tracks, len(ranked))
     with log.phase("Excel作成（シート生成・画像配置）"):
-        _build_compare_sheet(wb.create_sheet("外見比較"), cond.mode, queries, gallery, ranked, cond.skeleton)
+        _build_compare_sheet(wb.create_sheet("外見比較"), cond.mode, queries, gallery, ranked, cond.skeleton, cond.targets)
         _build_compare_sheet(wb.create_sheet("外見比較(追跡ID集約)"), cond.mode, queries, gallery,
-                             aggregated, cond.skeleton)
+                             aggregated, cond.skeleton, cond.targets)
     with log.phase("Excel保存"):
         path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(path)
