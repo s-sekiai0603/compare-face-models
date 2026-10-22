@@ -1,7 +1,16 @@
 .venv/
 __pycache__/
 *.pyc
-models/*.pt
-models/*.engine
-models/*.onnx
+# モデル重み・推論エンジンはサイズが大きいため Git 管理外（models/.gitkeep のみ管理）
+models/*
+!models/.gitkeep
+# 評価用の検証セット（lfw.bin 等。配布条件あり・サイズ大）も Git 管理外（dataset/.gitkeep のみ管理）
+dataset/*
+!dataset/.gitkeep
 settings.json
+# 検証エビデンス（Excel・抽出した顔画像。サイズが大きいため Git 管理外）
+reid_evidence/
+face_evidence/
+# 改修前の外見識別(reid)版のソース（参照用に手元に残すだけ。Git 管理外）
+reid/
+.pytest_cache/

@@ -1,7 +1,7 @@
 [project]
-name = "verify-appearance-reid"
+name = "compare-face-models"
 version = "0.1.0"
-description = "外見識別(reid)検証用: 映像からの外見画像抽出ツール"
+description = "顔識別モデル比較ツール: 映像からの顔画像抽出と、顔特徴量モデル/ランドマークモデルごとの類似度比較レポート出力"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
@@ -12,14 +12,24 @@ dependencies = [
     "lapx>=0.5.5",
     "torch",
     "torchvision",
-    "tensorrt-cu12>=10.8,<11",
+    # models/ の .engine（premises-security 側の環境で作成）は TensorRT 10.16.0.72 製。
+    # エンジンはライブラリのバージョンが完全一致しないと読み込めないため同じ版に固定する
+    "tensorrt-cu12==10.16.0.72",
     "onnx>=1.16",
     "onnxslim>=0.1.97",
-    "torchreid>=0.2.5",
-    "gdown>=6.4.1",
+    "onnxruntime>=1.18",
     "openpyxl>=3.1.5",
-    "scipy>=1.15.3",
-    "tensorboard>=2.21.0",
+    "pillow>=10",       # MTCNN（AdaFace 公式の移植）の画像処理
+    "pyyaml>=6",        # CVLFace リポジトリの設定ファイル読込
+    # CVLFace（Hugging Face の minchul/cvlface_* を直接読み込む）用
+    "huggingface_hub>=0.23",
+    "omegaconf>=2.3",
+    "timm>=0.9",
+    "easydict>=1.10",
+    # SimilarityTransform.estimate は skimage 2.2 で削除予定（from_estimate へ移行するまで上限を付ける）
+    "scikit-image>=0.21,<2.2",
+    # LAFS の重み（Google Drive 配布）の自動取得用
+    "gdown>=5.0",
 ]
 
 [dependency-groups]
@@ -30,7 +40,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/verify_reid"]
+packages = ["src/compare_face"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
