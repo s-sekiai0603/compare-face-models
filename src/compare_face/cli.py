@@ -4,6 +4,7 @@
   python -m compare_face list-models        登録済みモデルと重みの状態を表示
   python -m compare_face extract ...        映像から顔画像を抽出
   python -m compare_face report ...         顔特徴量比較レポートを出力
+  python -m compare_face query-set ...      検索元セット（コピーした顔画像の集まり）で総当たり・全体検索
   python -m compare_face eval ...           検証セット（lfw.bin 等）で 1:1 照合精度を測る
 """
 from __future__ import annotations
@@ -11,6 +12,25 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
+
+def _add_gate_args(parser: argparse.ArgumentParser) -> None:
+    """顔の採用基準（抽出時の顔ゲート・品質ガードのレポート時の再判定）。report と query-set で共通。"""
+    from .core.extract.face_crop import MIN_CROP_SIDE, MIN_EYE_RATIO
+    parser.add_argument("--no-face-gate", action="store_true",
+                        help="顔の採用基準: 骨格ルール（鼻+片目が見える / 下向きでない）を適用しない（既定は抽出時と同じく適用）")
+    parser.add_argument("--min-eye-ratio", type=float, default=MIN_EYE_RATIO,
+                        help=f"顔の採用基準: 両目間隔÷顔幅がこの値未満の画像（横顔）を使わない（既定 {MIN_EYE_RATIO:g} = 抽出時と同じ。0 で判定しない）")
+    parser.add_argument("--min-crop-side", type=float, default=MIN_CROP_SIDE,
+                        help=f"顔の採用基準: 切り出し短辺(px)がこの値未満の画像を使わない（既定 {MIN_CROP_SIDE:g} = 抽出時と同じ。0 で判定しない）")
+    parser.add_argument("--accept-all", action="store_true",
+                        help="顔の採用基準を適用せず、抽出した顔を全て使う（--no-face-gate --min-eye-ratio 0 --min-crop-side 0 と同じ）")
+
+
+def _gate_filter(args):
+    from .core.report.gate import GateFilter
+    return (GateFilter.accept_all() if args.accept_all
+            else GateFilter(not args.no_face_gate, args.min_eye_ratio, args.min_crop_side))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,11 +66,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="クエリ自動選別: 品質ノルム（AdaFace の特徴量ノルム）がこの値未満の画像を使わない（0 で無効。目安 17）")
     r.add_argument("--min-face-width", type=float, default=0.0,
                    help="クエリ自動選別: 顔枠の幅(px)がこの値未満の画像を使わない（0 で無効。目安 30）")
+    _add_gate_args(r)
     r.add_argument("--exclude-dir", action="append", default=[],
                    help="クエリ自身に加えて比較対象から外す追跡IDフォルダ（複数指定可。クエリ画像を別フォルダに集めたときの元の追跡IDなど）")
     r.add_argument("--clahe", action="store_true",
                    help="アライン後の顔画像に CLAHE（明るさ補正）を掛けてから特徴量化する（premises-security の AdaFace 前処理と同じ。"
                         "比較対象の特徴量キャッシュは別ファイルになる）")
+
+    qs = sub.add_parser("query-set", help="検索元セット（顔画像出力先\\検索元\\<セット名> にコピーした顔画像）の各画像で総当たり・全体検索をして Excel に出力する")
+    qs.add_argument("--set", required=True, help="検索元セットのフォルダ（比較対象フォルダの _face.jpg をコピーしたフォルダ。サブフォルダ可）")
+    qs.add_argument("--gallery", required=True, help="比較対象フォルダ（顔画像出力先と同じ構成）")
+    qs.add_argument("--out", required=True, help="Excel 出力先フォルダ")
+    qs.add_argument("--model", default="AdaFace", help="顔特徴量抽出モデル名（list-models で確認）")
+    qs.add_argument("--landmark", default="なし", help="顔ランドマークモデル名（list-models で確認）")
+    qs.add_argument("--pose", default="なし", help="頭部姿勢モデル名（list-models で確認）。指定すると検索元の yaw/pitch/roll を表示")
+    qs.add_argument("--person", action="append", default=[],
+                    help="本人の追跡ID「カメラID|映像ファイル名|追跡ID」を追加（複数指定可。空欄の項目は不問。検索元の元画像の追跡IDは自動で本人）")
+    qs.add_argument("--no-cache", action="store_true", help="比較対象の特徴量キャッシュを使わない")
+    qs.add_argument("--include-old", action="store_true", help="追跡IDフォルダ内の old フォルダに移した画像も比較対象に含める")
+    _add_gate_args(qs)
 
     v = sub.add_parser("eval", help="検証セット（insightface 形式の .bin）で顔特徴量モデルの 1:1 照合精度を測る")
     v.add_argument("--bin", action="append", default=None,
@@ -146,7 +180,8 @@ def _extract(args) -> int:
     faces = sum(r.image_count for r in results)
     tracks = sum(r.track_count for r in results)
     print(f"完了: 映像 {len(results)} 本 / 追跡ID {tracks} / 顔画像 {faces} 枚"
-          f"（うち無効 {sum(r.invalid_count for r in results)} 枚）\n出力先: {run_dir}")
+          f"（うち採用基準外 {sum(r.rejected_count for r in results)} 枚、無効 {sum(r.invalid_count for r in results)} 枚）"
+          f"\n出力先: {run_dir}")
     return 0
 
 
@@ -167,8 +202,18 @@ def _report(args) -> int:
                         merge_sec=0.0 if mode == MODE_IMAGE else args.merge_sec, pose_name=args.pose,
                         use_cache=not args.no_cache, include_excluded=args.include_old,
                         query_filter=QueryFilter(args.min_face_conf, args.min_norm, args.min_face_width),
-                        exclude_dirs=[Path(p) for p in args.exclude_dir], clahe=args.clahe)
+                        exclude_dirs=[Path(p) for p in args.exclude_dir], clahe=args.clahe, gate_filter=_gate_filter(args))
     print(f"レポートを出力しました: {out}")
+    return 0
+
+
+def _query_set(args) -> int:
+    from .core.report.query_set import run_query_set_search
+    out, _ = run_query_set_search(set_dir=Path(args.set), gallery_dir=Path(args.gallery), output_dir=Path(args.out),
+                                  model_name=args.model, landmark_name=args.landmark, pose_name=args.pose,
+                                  include_excluded=args.include_old, gate_filter=_gate_filter(args),
+                                  own_specs=[parse_target(t) for t in args.person], use_cache=not args.no_cache)
+    print(f"Excel を出力しました: {out}")
     return 0
 
 
@@ -219,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
             return _extract(args)
         if args.command == "report":
             return _report(args)
+        if args.command == "query-set":
+            return _query_set(args)
         if args.command == "download":
             return _download(args)
         if args.command == "eval":

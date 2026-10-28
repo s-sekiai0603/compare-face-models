@@ -17,16 +17,18 @@ from compare_face.core.landmarks.insightface_2d106 import (
 from compare_face.core.report.merge import assign_groups, merge_embeddings
 from compare_face.core.common.phase_log import PhaseLogger
 from compare_face.core.report.excel import (
-    EXCLUDED_DIR_MESSAGE, EXCLUDED_FILL, INVALID_FILL, MODE_IMAGE, SELF_QUERY_MESSAGE, TARGET_FILL, ReportConditions, build_report,
-    is_target, search_results,
+    EXCLUDED_DIR_MESSAGE, EXCLUDED_FILL, GATE_FILL, INVALID_FILL, MODE_IMAGE, QUERY_FILL, SELF_QUERY_MESSAGE, TARGET_FILL,
+    ReportConditions, build_report, is_target, search_results,
 )
 from compare_face.core.common.settings import load_settings
 from compare_face.core.report.similarity import aggregate_by_track, competition_ranks, rank_pairs, similarity_matrix
 from compare_face.core.extract.validity import face_box_mismatch_reason, foreign_skeleton_reason, revalidate_json
+from compare_face.core.report.gate import GateFilter, apply_gate_filter
 from compare_face.core.report.quality import QueryFilter, apply_query_filter
 
 
-def _make_track(root, run, cam, video, tid, stamps, location="本社", body=True):
+def _make_track(root, run, cam, video, tid, stamps, location="本社", body=True, **fields):
+    """fields は各画像の JSON 項目の上書き・追加（gate_ok 等）。"""
     d = root / run / cam / video / str(tid)
     d.mkdir(parents=True)
     images = []
@@ -37,7 +39,7 @@ def _make_track(root, run, cam, video, tid, stamps, location="本社", body=True
         images.append({"file_face": f"{ts}_face.jpg", "file_body": f"{ts}_body.jpg" if body else None,
                        "person_conf": 0.9, "face_conf": 0.8, "face_width": 42.0, "eye_ratio": 0.31,
                        "frontal": True, "quality": 5.0, "bbox_xyxy": [0, 0, 60, 160],
-                       "face_bbox_xyxy": [10, 5, 52, 50], "time_sec": 1.0})
+                       "face_bbox_xyxy": [10, 5, 52, 50], "time_sec": 1.0, **fields})
     (d / f"{tid}.json").write_text(json.dumps(
         {"track_id": tid, "video_file": f"{video}.mp4", "location": location, "images": images},
         ensure_ascii=False), encoding="utf-8")
@@ -131,6 +133,8 @@ def test_scan_gallery_reads_json_and_path(tmp_path):
     assert (e.location, e.video_file, e.person_conf) == ("本社", "20260311122723.mp4", 0.9)
     assert (e.face_conf, e.face_width, e.eye_ratio, e.frontal, e.quality) == (0.8, 42.0, 0.31, True, 5.0)
     assert e.embed_path.name.endswith("_face.jpg") and e.body_path.name.endswith("_body.jpg")
+    # 採用基準の判定値が無い古い抽出結果: 基準を通った画像として扱う
+    assert e.gate_ok and e.gate_reason == "" and e.face_visible is None and e.crop_min_side is None and e.used
 
 
 def test_scan_ignores_old_folder(tmp_path):
@@ -204,6 +208,8 @@ def test_limit_applies_and_setting_defaults():
     s = load_settings(path=Path("none.json"))
     assert (s["report_limit"], s["report_model"], s["report_landmark"], s["report_show_body"]) == (500, "AdaFace", "なし", True)
     assert s["report_include_old"] is False
+    from compare_face.core.extract.face_crop import MIN_CROP_SIDE, MIN_EYE_RATIO
+    assert (s["report_face_gate"], s["report_min_eye_ratio"], s["report_min_crop_side"]) == (True, MIN_EYE_RATIO, MIN_CROP_SIDE)  # 抽出時と同じ基準
 
 
 def test_assign_groups_fixed_windows_and_skip_empty():
@@ -438,6 +444,9 @@ def test_query_filter_and_apply(tmp_path):
     flt = QueryFilter(min_face_conf=0.65, min_norm=17, min_face_width=30)
     assert flt.enabled() and flt.describe() == "顔信頼度 >= 0.65 / 品質ノルム >= 17 / 顔幅 >= 30px"
     assert not QueryFilter().enabled() and QueryFilter().describe() == "指定なし"
+    g[1].gate_excluded_reason = "採用基準外"
+    assert apply_query_filter(g, QueryFilter(min_face_conf=0.65), None) == 0 and g[1].excluded_reason == ""  # 採用基準外は対象外
+    g[1].gate_excluded_reason = ""
     n = apply_query_filter(g, flt, [20.0, 25.0, 10.0])
     assert n == 1 and g[0].excluded_reason == "" and g[0].quality_norm == 20.0
     assert g[1].excluded_reason == "顔信頼度 0.500 < 0.65" and g[2].excluded_reason == ""  # 無効画像は数えない
@@ -459,6 +468,67 @@ def test_query_filter_and_apply(tmp_path):
     cond_rows = {r[0]: r[1] for r in wb["条件"].iter_rows(values_only=True)}
     assert cond_rows["クエリ自動選別（しきい値）"] == flt.describe()
     assert cond_rows["クエリ自動選別で除外した画像数（比較に不使用）"] == 1
+
+
+# ---- 顔の採用基準（抽出時の顔ゲート・品質ガードの再判定） ----
+def test_gate_fields_and_filter(tmp_path):
+    _make_track(tmp_path, "r", "C", "v", 1, ["20260311_122723_000"])  # 古い抽出結果（判定値なし）
+    _make_track(tmp_path, "r", "C", "v", 2, ["20260311_122724_000"], gate_ok=False, gate_reason="鼻または目が見えない",
+                face_visible=False, crop_min_side=70.0)
+    _make_track(tmp_path, "r", "C", "v", 3, ["20260311_122725_000"], gate_ok=False, gate_reason="両目の間隔が狭すぎる（横顔）",
+                face_visible=True, crop_min_side=70.0, eye_ratio=0.03)
+    _make_track(tmp_path, "r", "C", "v", 4, ["20260311_122726_000"], gate_ok=False, gate_reason="切り出しが小さい（短辺 40px < 60px）",
+                face_visible=True, crop_min_side=40.0)
+    _make_track(tmp_path, "r", "C", "v", 5, ["20260311_122727_000"], gate_ok=True, gate_reason="", face_visible=True, crop_min_side=70.0)
+    g = scan_gallery(tmp_path)
+    assert [e.gate_ok for e in g] == [True, False, False, False, True]
+    assert g[1].face_visible is False and g[0].face_visible is None and g[3].crop_min_side == 40.0
+    # 既定（抽出時と同じ）: 抽出時の gate_ok と同じ結果になる。判定値の無い古い抽出結果は通ったとみなす
+    flt = GateFilter()
+    assert flt.is_default() and flt.enabled() and flt.describe().startswith("抽出時と同じ（既定）")
+    assert apply_gate_filter(g, flt) == 3
+    assert [e.used for e in g] == [True, False, False, False, True]
+    assert g[1].gate_excluded_reason == "鼻または目が見えない"
+    assert g[2].gate_excluded_reason == "両目間隔比 0.03 < 0.05（横顔）"
+    assert g[3].gate_excluded_reason == "切り出し短辺 40px < 60px"
+    # 緩める: 骨格ルールなし・両目間隔比の判定なし・短辺 30px → 全て使う
+    loose = GateFilter(face_visible=False, min_eye_ratio=0.0, min_crop_side=30)
+    assert apply_gate_filter(g, loose) == 0 and not loose.is_default()
+    assert loose.describe() == "骨格ルールなし / 両目間隔比の判定なし / 切り出し短辺 >= 30px"
+    assert GateFilter.accept_all().describe() == "適用しない（抽出した顔を全て使う）" and not GateFilter.accept_all().enabled()
+    # 厳しくする: 短辺 80px → 抽出時に採用された画像も外れる（判定値の無い古い抽出結果は残る）
+    assert apply_gate_filter(g, GateFilter(min_crop_side=80)) == 4
+    assert g[4].gate_excluded_reason == "切り出し短辺 70px < 80px" and g[0].gate_excluded_reason == ""
+    # 無効画像は数えない
+    g[1].invalid = True
+    assert apply_gate_filter(g, GateFilter()) == 2 and g[1].gate_excluded_reason == ""
+
+
+def test_gate_excluded_query_blue_and_conditions(tmp_path):
+    _make_track(tmp_path, "r", "C", "v", 1, ["20260311_122723_000", "20260311_122724_000"])
+    _make_track(tmp_path, "r", "C", "v", 2, ["20260311_122800_000"], gate_ok=False,
+                gate_reason="両目の間隔が狭すぎる（横顔）", face_visible=True, crop_min_side=70.0, eye_ratio=0.03)
+    allx = scan_gallery(tmp_path)
+    queries, gallery = allx[:2], allx[2:]
+    queries[1].gate_excluded_reason = "切り出し短辺 40px < 60px"
+    used = [q for q in queries if q.used]
+    sim = np.array([[0.9]], np.float32)
+    out = tmp_path / "gate.xlsx"
+    text = "骨格ルールなし / 両目間隔比の判定なし / 切り出し短辺 >= 60px"
+    build_report(out, _cond(show_body=False, gate_filter_text=text), queries, gallery, rank_pairs(sim),
+                 aggregate_by_track(sim, ["k"]), _NOLOG, used_queries=used, n_gate_gallery=3)
+    wb = openpyxl.load_workbook(out)
+    ws = wb["顔比較"]
+    assert ws["A1"].fill.fgColor.rgb == QUERY_FILL.fgColor.rgb
+    assert ws["B1"].fill.fgColor.rgb == GATE_FILL.fgColor.rgb and ws["B2"].fill.fgColor.rgb == GATE_FILL.fgColor.rgb
+    assert "【採用基準外】特徴量比較に未使用" in ws["B1"].value and "40px < 60px" in ws["B1"].value
+    # 基準を緩めて使った比較対象画像には、抽出時の判定と切り出し短辺を表示
+    assert "抽出時は採用基準外:両目の間隔が狭すぎる（横顔）" in ws["A4"].value and "切出短辺:70px" in ws["A4"].value
+    assert "抽出時は採用基準外" not in ws["A1"].value
+    rows = {r[0]: r[1] for r in wb["条件"].iter_rows(values_only=True)}
+    assert rows["顔の採用基準（抽出時の顔ゲート・品質ガード。クエリ・比較対象に適用）"] == text
+    assert rows["クエリ採用基準外の画像数（比較に不使用）"] == 1
+    assert rows["比較対象 採用基準外の画像数（除外）"] == 3
 
 
 def test_gallery_reads_invalid_flag(tmp_path):

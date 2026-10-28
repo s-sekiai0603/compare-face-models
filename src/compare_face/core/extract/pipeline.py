@@ -7,6 +7,10 @@
 出力は追跡IDごとに interval_sec 秒間隔。顔ゲートを通った顔がある最初のフレームで出力する
 （premises-security のデバッグ画像抽出は全身を間隔出力しその瞬間に顔があれば顔も出すが、
 本ツールは顔が主役のため「顔が出せたフレーム」を基準に間隔を数える）。
+
+採用基準（顔ゲート・品質ガード）に外れた顔も保存する（JSON の gate_ok=false）。採用される顔の出力タイミングと処理量を
+変えないため、基準外の顔は採用の間隔内では出さず、採用できる顔が無い間だけ基準外の間隔で出す（decide_output）。
+使う・使わないはレポート時に決める。
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ import cv2
 import numpy as np
 
 from .tracker import PersonTracker, TrackedPerson
-from .face_crop import attach_faces, evaluate_face_gate, make_face_crop, quality_score
+from .face_crop import attach_faces, crop_guard_reason, evaluate_face_gate, make_face_crop, quality_score
 from .face_detector import FaceDetector
 from ..common.imageio import imwrite
 from .pose_detector import BATCH_SIZE, PoseDetector
@@ -42,7 +46,8 @@ class ExtractResult:
     video_path: Path
     out_dir: Path
     track_count: int = 0
-    image_count: int = 0    # 保存した顔画像の数
+    image_count: int = 0    # 保存した顔画像の数（採用基準外を含む）
+    rejected_count: int = 0  # 採用基準（顔ゲート・品質ガード）に外れたが保存した顔画像の数
     invalid_count: int = 0
     cancelled: bool = False
 
@@ -57,6 +62,23 @@ def make_timestamp(start: datetime | None, frame_index: int, fps: float) -> str:
 
 def should_output(last_sec: float | None, cur_sec: float, interval_sec: float) -> bool:
     return last_sec is None or (cur_sec - last_sec) >= interval_sec
+
+
+OUTPUT_ACCEPTED = "accepted"   # 採用基準を通った顔（premises-security が出力する顔）
+OUTPUT_REJECTED = "rejected"   # 採用基準に外れた顔（本ツールだけが保存する。レポート時に使うか決める）
+
+
+def decide_output(last_accepted: float | None, last_rejected: float | None, cur_sec: float,
+                  interval_sec: float, gate_ok: bool) -> str | None:
+    """この顔を出力するか。採用基準を通った顔は従来どおり採用の間隔だけで判定する（基準外の出力は影響しない）。
+    基準外の顔は、採用の間隔内（採用できる顔を出した直後）は出さず、採用できる顔が無い間だけ基準外の間隔で出す。
+    これで採用される顔の出力タイミングと 1 フレームあたりの処理量は、基準外の顔を保存しない場合と同じになる。
+    戻り値は OUTPUT_ACCEPTED / OUTPUT_REJECTED / None（出力しない）。"""
+    if not should_output(last_accepted, cur_sec, interval_sec):
+        return None
+    if gate_ok:
+        return OUTPUT_ACCEPTED
+    return OUTPUT_REJECTED if should_output(last_rejected, cur_sec, interval_sec) else None
 
 
 class _Decoder(threading.Thread):
@@ -191,7 +213,8 @@ def extract_video(
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     start_dt = parse_capture_datetime(video_path.name)
     tracker = PersonTracker(fps)
-    last_out: dict[int, float] = {}
+    last_out: dict[int, float] = {}   # 追跡ID -> 採用基準を通った顔を最後に出力した秒（出力対象の判定はこれだけで行う）
+    last_rej: dict[int, float] = {}   # 追跡ID -> 採用基準に外れた顔を最後に出力した秒
     records: dict[int, list[dict]] = {}
     decoder = _Decoder(cap)
     writer = _ImageWriter()
@@ -231,24 +254,28 @@ def extract_video(
                     p = persons[i]
                     fbox, fconf, src = faces[i]
                     gate = evaluate_face_gate(fbox, p.kpts)
-                    if not gate.ok:
+                    fc = make_face_crop(frame, fbox) if gate.ok else None  # 品質ガードは顔ゲートを通った顔だけ判定すればよい
+                    gate_ok = gate.ok and fc.guard_ok   # premises-security ならこの顔を出力するか
+                    kind = decide_output(last_out.get(p.track_id), last_rej.get(p.track_id), cur_sec, interval_sec, gate_ok)
+                    if kind is None:
                         continue
-                    crop, inflated = make_face_crop(frame, fbox)
-                    if crop is None:
+                    if fc is None:
+                        fc = make_face_crop(frame, fbox)  # 基準外の顔は出力するときだけ切り出す（処理量を従来と同じに保つ）
+                    if fc.image is None:
                         continue
                     ts = make_timestamp(start_dt, fi, fps)
                     tid_dir = out_dir / str(p.track_id)
-                    crop_xyxy = tuple(int(v) for v in inflated)
+                    crop_xyxy = tuple(int(v) for v in fc.inflated)
                     reason = (foreign_skeleton_reason(p.bbox_xyxy, pdet.all_boxes, pdet.all_kpts, crop_xyxy)
                               or face_box_mismatch_reason(p.kpts, fbox))
                     f_face = f"{ts}_face.jpg"
-                    writer.submit(tid_dir / f_face, crop)
+                    writer.submit(tid_dir / f_face, fc.image)
                     bx1, by1, bx2, by2 = _clip_body(p.bbox_xyxy, w, h)
                     f_body = None
                     if bx2 > bx1 and by2 > by1:
                         f_body = f"{ts}_body.jpg"
                         writer.submit(tid_dir / f_body, frame[by1:by2, bx1:bx2])
-                    last_out[p.track_id] = cur_sec
+                    (last_out if kind == OUTPUT_ACCEPTED else last_rej)[p.track_id] = cur_sec
                     records.setdefault(p.track_id, []).append({
                         "file_face": f_face,
                         "file_body": f_body,
@@ -263,6 +290,10 @@ def extract_video(
                         "face_source": src,
                         "face_width": round(gate.face_width, 1),
                         "face_height": round(float(fbox[3] - fbox[1]), 1),
+                        "gate_ok": gate_ok,                                   # 採用基準（顔ゲート + 品質ガード）を通ったか
+                        "gate_reason": gate.reason or crop_guard_reason(fc.min_side),  # 外れた理由（通れば空）
+                        "face_visible": gate.face_visible,                   # 骨格ルール（鼻+片目 / 下向きでない）を通ったか
+                        "crop_min_side": fc.min_side,                        # 切り出し box の短辺(px)。品質ガードの判定値
                         "eye_ratio": _round_or_none(gate.eye_ratio, 4),
                         "frontal": gate.frontal,
                         "nose_conf": _round_or_none(gate.nose_conf, 4),
@@ -298,6 +329,7 @@ def extract_video(
     if writer.error:
         raise writer.error
     result.track_count = len(records)
+    result.rejected_count = sum(1 for imgs in records.values() for im in imgs if not im["gate_ok"])
     result.invalid_count = sum(1 for imgs in records.values() for im in imgs if im["invalid"])
     if progress:
         progress(total, total)

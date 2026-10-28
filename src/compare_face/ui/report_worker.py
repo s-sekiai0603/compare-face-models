@@ -6,6 +6,7 @@ from ..core.features import WeightsUnavailable, get_extractor
 from ..core.landmarks import get_aligner
 from ..core.pose import get_pose_estimator
 from ..core.report.pipeline import run_report
+from ..core.report.query_set import run_query_set_search
 
 
 class WeightsWorker(QThread):
@@ -45,6 +46,24 @@ class ReportWorker(QThread):
     def run(self) -> None:
         try:
             out, _ = run_report(progress=self.progress.emit, **self.kwargs)
+            self.finished_ok.emit(str(out))
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class QuerySetWorker(QThread):
+    """検索元セット検索（query_set.run_query_set_search）を別スレッドで実行する。"""
+    progress = Signal(str)
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+
+    def run(self) -> None:
+        try:
+            out, _ = run_query_set_search(progress=self.progress.emit, **self.kwargs)
             self.finished_ok.emit(str(out))
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")

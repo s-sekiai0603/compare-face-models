@@ -161,7 +161,8 @@ class ExtractScreen(QWidget):
         QMessageBox.information(
             self, "顔画像抽出", f"{'キャンセルしました' if cancelled else '完了しました'}\n"
             f"映像: {len(results)} 本 / 追跡ID: {tracks} / 顔画像: {faces} 枚"
-            f"（うち無効 {sum(r.invalid_count for r in results)} 枚）\n出力先: {out_dir}")
+            f"（うち採用基準外 {sum(r.rejected_count for r in results)} 枚、無効 {sum(r.invalid_count for r in results)} 枚）"
+            f"\n出力先: {out_dir}")
 
     def _on_failed(self, msg: str) -> None:
         self._set_running(False)

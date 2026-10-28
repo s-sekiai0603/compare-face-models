@@ -17,6 +17,7 @@ from .merge import assign_groups, merge_embeddings
 from ..common.phase_log import PhaseLogger
 from ..pose import get_pose_estimator
 from .cache import EmbeddingCache
+from .gate import GateFilter, apply_gate_filter
 from .quality import QualityScorer, QueryFilter, apply_query_filter
 from ..features.base import WeightsUnavailable
 from .excel import MODE_IMAGE, ReportConditions, build_report
@@ -117,9 +118,12 @@ def run_report(model_name: str, landmark_name: str, mode: str, query_path: Path,
                output_dir: Path, show_body: bool = True, limit: int = 500, targets=None,
                merge_sec: float = 0.0, pose_name: str = "なし", progress=lambda s: None,
                echo=print, use_cache: bool = True, include_excluded: bool = False,
-               query_filter: QueryFilter | None = None, exclude_dirs=None, clahe: bool = False) -> tuple[Path, PhaseLogger]:
+               query_filter: QueryFilter | None = None, exclude_dirs=None, clahe: bool = False,
+               gate_filter: GateFilter | None = None) -> tuple[Path, PhaseLogger]:
     """include_excluded=True: 追跡IDフォルダ内の old フォルダに移した画像も、クエリ・比較対象の両方に元の追跡IDの画像として含める。
     clahe=True: アライン後の顔画像に CLAHE を掛けてから特徴量化する（クエリ・比較対象とも。キャッシュは別ファイル）。
+    gate_filter: 顔の採用基準（抽出時の顔ゲート・品質ガードの再判定）。クエリ・比較対象の両方に適用する。
+    None は抽出時と同じ基準（抽出時に採用された画像だけを使う = 従来どおり）。
     query_filter: クエリ画像の自動選別（顔信頼度・品質ノルム・顔幅のしきい値）。比較対象には適用しない。
     exclude_dirs: クエリ自身に加えて比較対象から外す追跡IDフォルダ（クエリ画像を別フォルダに集めたときの元の追跡IDなど）。
     「条件」シートに記録され、「探したい人物」に指定されていれば検索結果シートに照合対象外と表示する。"""
@@ -151,22 +155,30 @@ def run_report(model_name: str, landmark_name: str, mode: str, query_path: Path,
             raise ValueError("クエリの顔画像(_face.jpg)が見つかりません")
         if mode != MODE_IMAGE and merge_sec > 0:
             queries = sorted(queries, key=entry_seconds)  # 時刻の早い順
+        gate_filter = gate_filter or GateFilter()
+        n_gate_q = apply_gate_filter(queries, gate_filter)
         n_excluded_q = 0
         if query_filter is not None and query_filter.enabled():
             scorer = QualityScorer()
             norms = None
+            cand = [i for i, q in enumerate(queries) if not q.invalid and not q.gate_excluded_reason]  # 使わない画像は計算しない
             if scorer.weights_ready():
-                norms = scorer.norms([_read(q) for q in queries], aligner)
+                norms = [None] * len(queries)
+                for i, v in zip(cand, scorer.norms([_read(queries[i]) for i in cand], aligner)):
+                    norms[i] = v
             elif query_filter.min_norm > 0:
                 raise WeightsUnavailable(scorer.manual_instructions())
             n_excluded_q = apply_query_filter(queries, query_filter, norms)
-        used_queries = [q for q in queries if not q.invalid and not q.excluded_reason]  # 無効・自動選別除外は使わない
+        used_queries = [q for q in queries if q.used]  # 無効・採用基準外・自動選別除外は使わない
         n_invalid_q = sum(1 for q in queries if q.invalid)
         if not used_queries:
-            detail = f"（無効理由: {queries[0].invalid_reason}）" if mode == MODE_IMAGE else ""
-            raise ValueError(f"クエリ画像が全て無効（または自動選別で除外）のため比較できません{detail}")
+            q0 = queries[0]
+            detail = (f"（理由: {q0.invalid_reason or q0.gate_excluded_reason or q0.excluded_reason}）"
+                      if mode == MODE_IMAGE else "")
+            raise ValueError(f"クエリ画像が全て無効（または採用基準外・自動選別で除外）のため比較できません{detail}")
         q_emb, q_stats = embed_entries(extractor, aligner, used_queries, clahe=clahe)
-        rec.note = (f"クエリ画像 {len(queries)} 件（うち無効 {n_invalid_q} 件、自動選別で除外 {n_excluded_q} 件は特徴量比較に不使用）"
+        rec.note = (f"クエリ画像 {len(queries)} 件（うち無効 {n_invalid_q} 件、採用基準外 {n_gate_q} 件、"
+                    f"自動選別で除外 {n_excluded_q} 件は特徴量比較に不使用）"
                     f" / {_stats_note(q_stats, extractor.needs_landmarks)}")
     group_ids = None
     if mode != MODE_IMAGE and merge_sec > 0:
@@ -174,15 +186,16 @@ def run_report(model_name: str, landmark_name: str, mode: str, query_path: Path,
             used_gids = assign_groups([entry_seconds(q) for q in used_queries], merge_sec)
             q_emb = merge_embeddings(q_emb, used_gids)  # 行 = グループ(ID-1)
             it = iter(used_gids)
-            group_ids = [None if (q.invalid or q.excluded_reason) else next(it) for q in queries]  # 不使用画像はグループなし
+            group_ids = [next(it) if q.used else None for q in queries]  # 不使用画像はグループなし
             rec.note = f"有効画像 {len(used_queries)} 件 -> グループ {len(q_emb)} 件"
     with log.phase("比較対象スキャン") as rec:
         gallery_all = scan_gallery(Path(gallery_dir), include_excluded=include_excluded, **exclude)
-        gallery = [g for g in gallery_all if not g.invalid]  # 無効画像は比較対象から外す
+        n_gate_g = apply_gate_filter(gallery_all, gate_filter)
+        gallery = [g for g in gallery_all if g.used]  # 無効画像・採用基準外は比較対象から外す
         if not gallery:
-            raise ValueError("比較対象フォルダに有効な顔画像(_face.jpg)が見つかりません")
+            raise ValueError("比較対象フォルダに有効な顔画像(_face.jpg)が見つかりません（無効・採用基準外を除く）")
         rec.note = (f"画像 {len(gallery)} 件 / 追跡ID {len({g.track_key for g in gallery})} 件"
-                    f" / 無効画像 {len(gallery_all) - len(gallery)} 件を除外")
+                    f" / 無効画像 {sum(1 for g in gallery_all if g.invalid)} 件・採用基準外 {n_gate_g} 件を除外")
     with log.phase("比較対象 顔特徴量抽出") as rec:
         cache = (EmbeddingCache(Path(gallery_dir), model_name, landmark_name, variant="clahe" if clahe else "")
                  if use_cache else None)
@@ -208,10 +221,11 @@ def run_report(model_name: str, landmark_name: str, mode: str, query_path: Path,
     cond = ReportConditions(model_name, landmark_name, mode, str(query_path), str(gallery_dir), str(output_dir),
                             show_body, generated, limit, targets, merge_sec, pose_name, include_excluded,
                             query_filter.describe() if query_filter is not None else "指定なし",
-                            tuple(str(p) for p in extra_exclude), clahe)
+                            tuple(str(p) for p in extra_exclude), clahe, gate_filter.describe())
     out = Path(output_dir) / f"compared_face_{generated:%Y%m%d_%H%M%S}.xlsx"
     build_report(out, cond, queries, gallery, ranked, aggregated, log, group_ids, used_queries,
                  n_align_failed=q_stats.align_failed + g_stats.align_failed,
                  n_landmark_missing=(q_stats.landmark_missing + g_stats.landmark_missing
-                                     if extractor.needs_landmarks else None))
+                                     if extractor.needs_landmarks else None),
+                 n_gate_gallery=n_gate_g)
     return out, log

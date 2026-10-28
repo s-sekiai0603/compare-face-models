@@ -22,12 +22,21 @@ DEFAULTS = {
     "report_min_face_conf": 0.0,
     "report_min_norm": 0.0,
     "report_min_face_width": 0,
+    # 顔の採用基準の既定 = 抽出時と同じ値（extract/face_crop.py の MIN_EYE_RATIO / MIN_CROP_SIDE。common から extract を
+    # import しないよう値を直接書く。食い違いは tests/test_report.py で検出する）
+    "report_face_gate": True,                 # 骨格ルール（鼻+片目 / 下向きでない）を適用
+    "report_min_eye_ratio": 0.05,             # 両目間隔比のしきい値
+    "report_min_crop_side": 60,               # 切り出し短辺(px)のしきい値
     "report_model": "AdaFace",
     "report_landmark": "なし",
     "report_pose": "なし",
     "report_limit": 500,
     "report_targets": [],
     "report_merge_sec": 0.0,
+    "query_set_name": "",            # 検索元セット検索: 前回選んだセット名（顔画像出力先\検索元\<セット名>）
+    "query_set_gallery_dir": "",
+    "query_set_output_dir": "",
+    "query_set_persons": "",         # 本人の追跡IDの追加指定（1 行 1 件「カメラID|映像ファイル名|追跡ID」）
 }
 
 

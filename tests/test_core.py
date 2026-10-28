@@ -3,10 +3,12 @@ from pathlib import Path
 
 import numpy as np
 
-from compare_face.core.extract.pipeline import make_timestamp, should_output
+from compare_face.core.extract.pipeline import (
+    OUTPUT_ACCEPTED, OUTPUT_REJECTED, decide_output, make_timestamp, should_output,
+)
 from compare_face.core.extract.face_crop import (
-    MIN_CROP_SIDE, SMALL_FACE_TARGET_LONG_SIDE, adaptive_margin, attach_faces, crop_face,
-    evaluate_face_gate, inflate_box, make_face_crop, prepare_small_face_roi, quality_score,
+    MIN_CROP_SIDE, SMALL_FACE_TARGET_LONG_SIDE, adaptive_margin, attach_faces, crop_face, crop_guard_reason,
+    crop_min_side, evaluate_face_gate, inflate_box, make_face_crop, prepare_small_face_roi, quality_score,
 )
 from compare_face.core.extract.face_detector import FACE_MODEL_CANDIDATES, find_face_model
 from compare_face.core.extract.pose_detector import passes_hard_filter
@@ -27,6 +29,19 @@ def test_should_output():
     assert should_output(None, 0.0, 0.5)
     assert not should_output(1.0, 1.4, 0.5)
     assert should_output(1.0, 1.5, 0.5)
+
+
+def test_decide_output_keeps_accepted_cadence():
+    # 採用基準を通った顔: 従来どおり採用の間隔だけで判定（基準外の顔を出していても影響しない）
+    assert decide_output(None, 0.0, 0.1, 0.5, gate_ok=True) == OUTPUT_ACCEPTED
+    assert decide_output(0.0, None, 0.4, 0.5, gate_ok=True) is None
+    assert decide_output(0.0, None, 0.5, 0.5, gate_ok=True) == OUTPUT_ACCEPTED
+    assert decide_output(0.0, 0.4, 0.5, 0.5, gate_ok=True) == OUTPUT_ACCEPTED
+    # 基準外の顔: 採用の間隔内（採用できる顔を出した直後）は出さない。採用できる顔が無い間は基準外の間隔で出す
+    assert decide_output(0.0, None, 0.4, 0.5, gate_ok=False) is None
+    assert decide_output(None, None, 0.0, 0.5, gate_ok=False) == OUTPUT_REJECTED
+    assert decide_output(None, 0.0, 0.4, 0.5, gate_ok=False) is None
+    assert decide_output(None, 0.0, 0.5, 0.5, gate_ok=False) == OUTPUT_REJECTED
 
 
 def test_make_timestamp():
@@ -54,14 +69,14 @@ def _kpts(nose=(50, 20, 0.9), l_eye=(45, 15, 0.9), r_eye=(55, 15, 0.9), l_ear=(4
 
 def test_face_gate_ok_and_frontal():
     g = evaluate_face_gate(FACE, _kpts())
-    assert g.ok and g.frontal and g.reason == ""
+    assert g.ok and g.face_visible and g.frontal and g.reason == ""
     assert g.face_width == 20 and abs(g.eye_ratio - 0.5) < 1e-6
     assert np.allclose([g.nose_conf, g.l_eye_conf, g.r_eye_conf], 0.9)
 
 
 def test_face_gate_rejects_without_nose():
     g = evaluate_face_gate(FACE, _kpts(nose=(50, 20, 0.1)))
-    assert not g.ok and "鼻" in g.reason
+    assert not g.ok and not g.face_visible and "鼻" in g.reason
 
 
 def test_face_gate_one_eye_is_enough_but_not_frontal():
@@ -71,17 +86,19 @@ def test_face_gate_one_eye_is_enough_but_not_frontal():
 
 def test_face_gate_rejects_face_down():
     g = evaluate_face_gate(FACE, _kpts(l_ear=(40, 10, 0.9)))  # 耳(y=10)が目(y=15)より上
-    assert not g.ok and "下向き" in g.reason
+    assert not g.ok and not g.face_visible and "下向き" in g.reason
 
 
 def test_face_gate_rejects_narrow_eyes():
     g = evaluate_face_gate(FACE, _kpts(l_eye=(50, 15, 0.9), r_eye=(50.5, 15, 0.9)))
     assert not g.ok and "横顔" in g.reason
+    assert g.face_visible and g.eye_ratio < 0.05  # 骨格ルールは通っている（レポート時に両目間隔比だけ緩められる）
 
 
 def test_face_gate_without_keypoints():
     assert not evaluate_face_gate(FACE, None).ok
     assert not evaluate_face_gate(FACE, np.zeros((3, 3), np.float32)).ok
+    assert not evaluate_face_gate(FACE, None).face_visible
 
 
 # ---- マージン・ROI・クロップ ----
@@ -108,21 +125,24 @@ def test_small_face_roi_upscales_only_small_faces():
     assert (b2[2] - b2[0]) > 30 and (b2[3] - b2[1]) > 40  # 拡大されている
 
 
-def test_crop_face_guard_and_shape():
+def test_crop_face_shape_and_guard_value():
     frame = np.zeros((300, 300, 3), np.uint8)
-    assert crop_face(frame, (0, 0, MIN_CROP_SIDE - 10, MIN_CROP_SIDE - 10)) is None
-    assert crop_face(frame, (10, 10, 80, 90)).shape == (81, 71, 3)
+    small = (0, 0, MIN_CROP_SIDE - 10, MIN_CROP_SIDE - 10)
+    assert crop_face(frame, small).shape == (MIN_CROP_SIDE - 9, MIN_CROP_SIDE - 9, 3)  # 小さくても切り出す（ガードは別判定）
+    assert crop_min_side(small) == MIN_CROP_SIDE - 10
+    assert "切り出しが小さい" in crop_guard_reason(crop_min_side(small)) and crop_guard_reason(MIN_CROP_SIDE) == ""
+    assert crop_face(frame, (10, 10, 80, 90)).shape == (81, 71, 3) and crop_min_side((10, 10, 80, 90)) == 70
 
 
 def test_make_face_crop_pipeline():
     frame = np.random.randint(0, 255, (300, 300, 3), np.uint8)
-    crop, inflated = make_face_crop(frame, (100, 100, 180, 190))
-    assert crop is not None and crop.ndim == 3 and inflated.shape == (4,)
-    assert inflated[0] < 100 and inflated[2] > 180  # マージンで拡張されている
+    fc = make_face_crop(frame, (100, 100, 180, 190))
+    assert fc.image is not None and fc.image.ndim == 3 and fc.inflated.shape == (4,) and fc.guard_ok
+    assert fc.inflated[0] < 100 and fc.inflated[2] > 180  # マージンで拡張されている
     # 小顔は ROI 拡大後の座標で短辺ガード(60px)を判定する（premises-security と同じ）。
-    # 幅 2px の極端に細い顔は拡大しても 60px に届かず棄却される
-    tiny, _ = make_face_crop(frame, (10, 10, 12, 20))
-    assert tiny is None
+    # 幅 2px の極端に細い顔は拡大しても 60px に届かずガードに外れるが、画像は返す（使うかはレポート時に決める）
+    tiny = make_face_crop(frame, (10, 10, 12, 20))
+    assert tiny.image is not None and not tiny.guard_ok and tiny.min_side < MIN_CROP_SIDE
 
 
 def test_quality_score():

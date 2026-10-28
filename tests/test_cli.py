@@ -25,7 +25,19 @@ def test_report_defaults_and_targets():
     a2 = build_parser().parse_args(["report", "--query", "q", "--gallery", "g", "--out", "o",
                                     "--min-face-conf", "0.65", "--min-norm", "17", "--min-face-width", "30"])
     assert (a2.min_face_conf, a2.min_norm, a2.min_face_width) == (0.65, 17.0, 30.0)
+    # 顔の採用基準の既定は抽出時と同じ（骨格ルールあり / 両目間隔比 0.05 / 切り出し短辺 60px）
+    assert (args.no_face_gate, args.min_eye_ratio, args.min_crop_side, args.accept_all) == (False, 0.05, 60, False)
+    a3 = build_parser().parse_args(["report", "--query", "q", "--gallery", "g", "--out", "o",
+                                    "--no-face-gate", "--min-eye-ratio", "0", "--min-crop-side", "30"])
+    assert (a3.no_face_gate, a3.min_eye_ratio, a3.min_crop_side) == (True, 0.0, 30.0)
+    assert build_parser().parse_args(["report", "--query", "q", "--gallery", "g", "--out", "o", "--accept-all"]).accept_all
     assert build_parser().parse_args(["revalidate", "--faces", "f"]).faces == "f"
+    # 検索元セット検索: 採用基準の引数は report と同じ。--person は複数指定
+    q = build_parser().parse_args(["query-set", "--set", "s", "--gallery", "g", "--out", "o", "--person", "Cam1|v.mp4|3",
+                                   "--person", "Cam2", "--min-crop-side", "0"])
+    assert (q.set, q.model, q.landmark, q.pose, q.include_old, q.no_cache) == ("s", "AdaFace", "なし", "なし", False, False)
+    assert (q.no_face_gate, q.min_eye_ratio, q.min_crop_side, q.accept_all) == (False, 0.05, 0.0, False)
+    assert [parse_target(t) for t in q.person] == [("Cam1", "v.mp4", "3"), ("Cam2", "", "")]
     assert build_parser().parse_args(["report", "--query", "q", "--gallery", "g", "--out", "o", "--include-old"]).include_old
     assert build_parser().parse_args(["report", "--query", "q", "--gallery", "g", "--out", "o",
                                       "--exclude-dir", "d1", "--exclude-dir", "d2"]).exclude_dir == ["d1", "d2"]

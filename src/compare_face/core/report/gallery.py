@@ -48,11 +48,21 @@ class GalleryEntry:
     face_bbox_xyxy: list | None = None
     person_bbox_xyxy: list | None = None  # 全身画像の切り出し枠（フレーム座標）。頭部姿勢の余白広めクロップに使う
     time_sec: float | None = None      # 映像内経過秒（json）
+    gate_ok: bool = True               # 抽出時の採用基準（顔ゲート + 品質ガード）を通ったか = premises-security が出力する画像か
+    gate_reason: str = ""              # 採用基準に外れた理由（抽出時の判定）
+    face_visible: bool | None = None   # 骨格ルール（鼻+片目が見える / 下向きでない）を通ったか。判定値の無い古い抽出結果は None
+    crop_min_side: float | None = None  # 切り出し box の短辺(px)。品質ガードの判定値。古い抽出結果は None
     invalid: bool = False              # 無効画像（別人の骨格を含む等）。比較に使わない
     invalid_reason: str = ""
     pose: tuple[float, float, float] | None = None  # レポート時に推定した頭部姿勢 (yaw, pitch, roll)[度]
     quality_norm: float | None = None  # 品質ノルム（AdaFace の特徴量ノルム。クエリ自動選別時に計算）
+    gate_excluded_reason: str = ""     # レポート時の採用基準（gate.GateFilter）で外した理由（空なら使用）
     excluded_reason: str = ""          # クエリ自動選別で外した理由（空なら使用）
+
+    @property
+    def used(self) -> bool:
+        """特徴量比較に使うか（無効・採用基準外・自動選別除外のいずれでもない）。"""
+        return not (self.invalid or self.gate_excluded_reason or self.excluded_reason)
 
     @property
     def track_key(self) -> Path:
@@ -132,33 +142,53 @@ def _make_entry(face: Path, cache: _TrackMetaCache) -> GalleryEntry | None:
         face_bbox_xyxy=im.get("face_bbox_xyxy"),
         person_bbox_xyxy=im.get("bbox_xyxy"),
         time_sec=im.get("time_sec"),
+        gate_ok=bool(im.get("gate_ok", True)),  # 判定値の無い古い抽出結果は基準を通った画像しか無い
+        gate_reason=im.get("gate_reason") or "",
+        face_visible=im.get("face_visible"),
+        crop_min_side=im.get("crop_min_side"),
         invalid=bool(im.get("invalid", False)),
         invalid_reason=im.get("invalid_reason") or "",
     )
 
 
 EXCLUDED_DIR_NAMES = {"old"}  # 追跡IDフォルダ内のこの名前のフォルダに移した画像は、既定ではクエリ・比較対象とも使わない
+QUERY_SETS_DIR_NAME = "検索元"  # 顔画像出力先直下の検索元セット置き場（query_set.py）。比較対象の走査では常に飛ばす
 
 
-def _in_excluded_dir(face: Path, root: Path) -> bool:
+def _dir_parts(face: Path, root: Path) -> tuple[str, ...]:
     try:
         parts = face.relative_to(root).parts[:-1]
     except ValueError:
         parts = face.parts[:-1]
-    return any(p.lower() in EXCLUDED_DIR_NAMES for p in parts)
+    return tuple(p.lower() for p in parts)
+
+
+def in_excluded_dir(face: Path, root: Path) -> bool:
+    """old フォルダ（EXCLUDED_DIR_NAMES）の中の画像か。"""
+    return any(p in EXCLUDED_DIR_NAMES for p in _dir_parts(face, root))
+
+
+def in_query_sets_dir(face: Path, root: Path) -> bool:
+    """走査ルート直下の検索元セット置き場（QUERY_SETS_DIR_NAME）の中の画像か。比較対象のコピーなので比較対象には数えない。
+    直下だけを見る（深い階層に同名のカメラ・追跡IDフォルダがあっても対象のまま）。"""
+    parts = _dir_parts(face, root)
+    return bool(parts) and parts[0] == QUERY_SETS_DIR_NAME.lower()
 
 
 def scan_gallery(root: Path, exclude_dirs: set[Path] | None = None,
                  exclude_files: set[Path] | None = None, include_excluded: bool = False) -> list[GalleryEntry]:
     """root 配下の全 _face.jpg を走査する。exclude_* はクエリ自身の除外用（追跡IDフォルダ単位・画像単位）。
     old フォルダ（EXCLUDED_DIR_NAMES）に移された画像は既定では対象外（手で選別した画像を外す仕組み）。
-    include_excluded=True なら old の画像も元の追跡IDの画像として含める（選別前の状態で比較するため）。"""
+    include_excluded=True なら old の画像も元の追跡IDの画像として含める（選別前の状態で比較するため）。
+    検索元セット置き場（QUERY_SETS_DIR_NAME）の画像は常に対象外。"""
     cache = _TrackMetaCache()
     ex_dirs = {p.resolve() for p in (exclude_dirs or set())}
     ex_files = {p.resolve() for p in (exclude_files or set())}
     entries: list[GalleryEntry] = []
     for face in sorted(root.rglob("*_face.jpg")):
-        if not include_excluded and _in_excluded_dir(face, root):
+        if in_query_sets_dir(face, root):
+            continue
+        if not include_excluded and in_excluded_dir(face, root):
             continue
         e = _make_entry(face, cache)
         if e is None:

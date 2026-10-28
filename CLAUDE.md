@@ -22,7 +22,7 @@
 顔識別（YOLOv8-Face → 骨格による顔ゲート → 適応マージン）と同じにしてある。
 
 - Python 3.10〜3.12。依存管理は `uv`（`pyproject.toml` / `uv.lock`）。`uv sync` で `.venv` を作る。
-- 起動: `start.bat` または `uv run python -m compare_face`。CLI: `extract` / `report` / `eval` / `revalidate` / `download` / `list-models`。
+- 起動: `start.bat` または `uv run python -m compare_face`。CLI: `extract` / `report` / `query-set` / `eval` / `revalidate` / `download` / `list-models`。
 - テスト: `uv run pytest`（GPU・モデル重みなしで全件通ること。重みがあれば strict 読込の確認も走る）。
 - `reid/`（改修前の外見識別(reid)版のソース）は手元に参照用として残しているだけで Git 管理外（`.gitignore`）。編集しない。
 - 設定は `settings.json`（Git 管理外）。
@@ -33,13 +33,13 @@
 
 | 場所 | 役割 |
 |---|---|
-| `cli.py` / `app.py` / `ui/` | コマンドライン、GUI（PySide6）。処理本体は持たない |
+| `cli.py` / `app.py` / `ui/` | コマンドライン、GUI（PySide6）。処理本体は持たない。`ui/widgets.py` は画面共通の部品（顔の採用基準の行、モデル選択、重みの確認）、`ui/query_set_screen.py` は検索元セット検索画面 |
 | `core/common/` | 共通部品: `weights.py`（models/ の各フォルダと `WeightsUnavailable`）, `settings.py`, `imageio.py`（日本語パス対応の読み書き）, `phase_log.py`, `face_template.py`（ArcFace 5 点）, `cvlface_repo.py`（Hugging Face リポジトリの直接読込） |
 | `core/extract/` | 抽出パイプライン: `pipeline.py`（映像 → 顔画像）, `pose_detector.py` / `pose_model.py`（YOLOv8-pose）, `face_detector.py`（YOLOv8-Face）, `tracker.py`（BoT-SORT）, `face_crop.py`（顔ゲート・適応マージン・小顔 ROI）, `validity.py`, `video_scanner.py` |
 | `core/landmarks/` | 顔ランドマークモデルのレジストリ（`base.py` の `FaceAligner` を継承して `@register`）: なし / 2d106det / SCRFD / RetinaFace-R50（`retinaface_r50.py`、Pytorch_Retinaface の移植）/ MTCNN（`mtcnn.py` + `mtcnn_net.py`、AdaFace 公式の移植）/ CVLFace DFA。入力は顔がほぼ全面の切り出しなので、検出器には余白を足してから渡す |
 | `core/features/` | 顔特徴量モデルのレジストリ（`base.py` の `FaceFeatureExtractor` を継承して `@register`）: AdaFace / CVLFace / LAFS / FSPFM。`*_net.py` は元コードから移植したネットワーク定義 |
 | `core/pose/` | 頭部姿勢のレジストリ（`__init__.py` の `POSE_OPTIONS`）: HopeNet（`hopenet.py`。FSPFM の姿勢入力にも使う）/ 6DRepNet（`sixdrepnet.py`、RepVGG-B1g2 の移植）。レポートの yaw/pitch/roll 表示に使う |
-| `core/report/` | レポートパイプライン: `pipeline.py`（アライン → 特徴量 → 類似度 → Excel）, `gallery.py`, `merge.py`, `similarity.py`, `excel.py`, `cache.py`（比較対象の特徴量キャッシュ）, `quality.py`（クエリ自動選別と品質ノルム） |
+| `core/report/` | レポートパイプライン: `pipeline.py`（アライン → 特徴量 → 類似度 → Excel）, `gallery.py`, `merge.py`, `similarity.py`, `excel.py`, `cache.py`（比較対象の特徴量キャッシュ）, `quality.py`（クエリ自動選別と品質ノルム）, `gate.py`（顔の採用基準 = 抽出時の顔ゲート・品質ガードの再判定）, `query_set.py` / `query_set_excel.py`（検索元セット検索: 顔画像出力先\検索元\<セット名> にコピーした N 枚の総当たりと比較対象全体での順位。元画像はバイト一致で特定） |
 | `core/eval/` | 精度の検証: `verification.py`（.bin 読込、insightface と同じ 10 分割交差検証）, `pipeline.py`（モデル × ランドマークの一括評価と CSV）, `published.py`（論文・README の公表値と出典） |
 
 ### モデル重みの置き場所（`models/`、Git 管理外）
@@ -69,6 +69,15 @@
   TTA など特徴量の値が変わる変更をしたら `CACHE_SCHEMA` を上げて古いキャッシュを無効化すること。
 - 無効判定は `core/extract/validity.py` の 2 ルール（別人の骨格 / 顔枠に本人の鼻点が無い）。クエリ自動選別（顔信頼度・品質ノルム・顔幅）は
   クエリだけに適用し、比較対象には適用しない（人物ごと消えるため）。品質ノルムは識別モデルに関係なく AdaFace で測る。
+- 抽出は顔ゲート・品質ガード（採用基準）に外れた顔も保存し、JSON の `gate_ok` / `gate_reason` / `face_visible` / `crop_min_side` に
+  判定を記録する。採用される顔の出力タイミングと処理量を変えないため、基準外の顔は採用の間隔内では出さず、採用できる顔が無い間だけ
+  基準外の間隔で出す（`pipeline.decide_output`。出力対象の判定 `due` は従来どおり採用の間隔だけで行う）。
+  使う・使わないはレポート時の `core/report/gate.py`（`GateFilter`）で決め、クエリ・比較対象の両方に適用する。既定値は抽出時と同じ
+  （骨格ルールあり / 両目間隔比 0.05 / 切り出し短辺 60px）なので従来と同じ結果になる。判定値の無い古い抽出結果は通ったとみなす。
+  `face_crop.py` の定数を変えるときは `GateFilter` の既定値（同じ定数を参照）と README の表も確認する。
+- 検索元セット（`gallery.QUERY_SETS_DIR_NAME` = `検索元`）は顔画像出力先の直下に置くので比較対象フォルダの中に入る。`scan_gallery` は
+  このフォルダを常に飛ばす（コピーした画像を比較対象に二重に数えない）。検索元の元画像はバイト一致（サイズ + MD5）で探し、比較対象に
+  ある画像は特徴量を再利用する。本人の追跡ID = 元画像の追跡ID + 追加指定で、比較対象に無い追跡IDは順位を出せないので本人に入れない。
 - 入力のチャネル順: AdaFace は公式 inference.py どおり BGR、CVLFace / LAFS / FSPFM は RGB。いずれも CFP-FP で両方を
   測って決めた値なので、根拠なく変えない。premises-security の AdaFace 前処理（RGB + CLAHE）を再現したいときは
   `--clahe` を使う（チャネル順だけは BGR のままで、CFP-FP の差は 0.2 ポイント）。

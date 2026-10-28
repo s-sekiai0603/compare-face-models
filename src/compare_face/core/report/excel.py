@@ -27,6 +27,7 @@ QUERY_FILL = PatternFill("solid", fgColor="FFD9EAD3")
 INVALID_FILL = PatternFill("solid", fgColor="FFBFBFBF")  # 無効画像（グレー）
 TARGET_FILL = PatternFill("solid", fgColor="FFFFC0CB")  # 探したい人物（ピンク）
 EXCLUDED_FILL = PatternFill("solid", fgColor="FFFCE4D6")  # クエリ自動選別で除外（薄い橙）
+GATE_FILL = PatternFill("solid", fgColor="FFDDEBF7")  # 顔の採用基準（顔ゲート・品質ガード）で除外（薄い青）
 MAX_TARGETS = 10
 SEARCH_SHEET = "探したい人物検索結果"
 SEARCH_HEADS = ["指定No", "指定(カメラID/映像/追跡ID)", "順位", "類似度", "ロケーション", "カメラID", "追跡ID",
@@ -55,6 +56,7 @@ class ReportConditions:
     query_filter_text: str = "指定なし"  # クエリ自動選別のしきい値（QueryFilter.describe()）
     extra_exclude_dirs: tuple = ()  # クエリ自身に加えて比較対象から外した追跡IDフォルダ（run_report の exclude_dirs）
     clahe: bool = False          # True: アライン後の顔画像に CLAHE を掛けてから特徴量化（run_report の clahe）
+    gate_filter_text: str = "抽出時と同じ（既定）"  # 顔の採用基準（GateFilter.describe()）
 
 
 def _norm_video(name: str) -> str:
@@ -115,15 +117,22 @@ def _info_text(e: GalleryEntry, head: str, sim: float | None = None, extra: str 
         lines.append(extra)
     if e.invalid:
         lines += ["【無効画像】特徴量比較に未使用", f"無効理由:{e.invalid_reason or '-'}"]
+    elif e.gate_excluded_reason:
+        lines += ["【採用基準外】特徴量比較に未使用", f"理由:{e.gate_excluded_reason}"]
     elif e.excluded_reason:
         lines += ["【自動選別で除外】特徴量比較に未使用", f"理由:{e.excluded_reason}"]
+    if not e.gate_ok and not e.gate_excluded_reason:  # 基準を緩めて使った、抽出時には不採用だった画像
+        lines.append(f"抽出時は採用基準外:{e.gate_reason or '-'}")
     quality_line = f"正面度:{_fmt_ratio(e.eye_ratio, e.frontal)} / 品質:{_fmt_quality(e.quality)}"
     if e.quality_norm is not None:
         quality_line += f" / ノルム:{e.quality_norm:.1f}"
+    face_line = f"顔信頼度:{_fmt_conf(e.face_conf)} / 顔幅:{_fmt_px(e.face_width)}"
+    if e.crop_min_side is not None:
+        face_line += f" / 切出短辺:{_fmt_px(e.crop_min_side)}"
     lines += [
         f"Loc:{e.location} / Cam:{e.camera_id}",
         f"Track:{e.track_id} / 人物信頼度:{_fmt_conf(e.person_conf)}",
-        f"顔信頼度:{_fmt_conf(e.face_conf)} / 顔幅:{_fmt_px(e.face_width)}",
+        face_line,
         quality_line,
     ]
     if e.pose is not None:
@@ -183,7 +192,8 @@ def _grid_rows(n: int, show_body: bool) -> int:
 
 def _build_conditions(ws, cond: ReportConditions, n_query: int, n_gallery: int, n_tracks: int, n_out: int,
                       n_groups: int = 0, n_invalid_query: int = 0, n_align_failed: int = 0,
-                      n_landmark_missing: int | None = None, n_excluded_query: int = 0) -> None:
+                      n_landmark_missing: int | None = None, n_excluded_query: int = 0,
+                      n_gate_query: int = 0, n_gate_gallery: int = 0) -> None:
     ws.column_dimensions["A"].width = 30
     ws.column_dimensions["B"].width = 90
     query_label = "クエリ顔画像" if cond.mode == MODE_IMAGE else "クエリ追跡IDフォルダ"
@@ -199,18 +209,21 @@ def _build_conditions(ws, cond: ReportConditions, n_query: int, n_gallery: int, 
         ("全身画像の表示", "ON" if cond.show_body else "OFF"),
         ("レポート出力件数(上位)", cond.limit),
         ("old フォルダの画像", "含める（選別なし）" if cond.include_excluded else "除外（選別あり。既定）"),
+        ("顔の採用基準（抽出時の顔ゲート・品質ガード。クエリ・比較対象に適用）", cond.gate_filter_text),
         ("比較対象から追加で除外した追跡IDフォルダ", "\n".join(cond.extra_exclude_dirs) or "指定なし"),
         ("探したい人物(ピンク表示)", "\n".join(
             f"カメラID:{c or '-'} / 映像:{v or '-'} / 追跡ID:{t or '-'}"
             for c, v, t in (cond.targets or []) if c or v or t) or "指定なし"),
         ("クエリ画像数", n_query),
         ("クエリ無効画像数（比較に不使用）", n_invalid_query),
+        ("クエリ採用基準外の画像数（比較に不使用）", n_gate_query),
         ("クエリ自動選別（しきい値）", cond.query_filter_text),
         ("前処理 CLAHE（明るさ補正）", "あり（アライン後の顔画像に適用）" if cond.clahe else "なし"),
         ("クエリ自動選別で除外した画像数（比較に不使用）", n_excluded_query),
         ("特徴量マージ単位(秒)", (f"{cond.merge_sec:g}（クエリグループ数: {n_groups}）"
                               if cond.merge_sec > 0 else "指定なし")),
         ("比較対象 画像数", n_gallery),
+        ("比較対象 採用基準外の画像数（除外）", n_gate_gallery),
         ("比較対象 追跡ID数", n_tracks),
         ("アライン失敗数（リサイズで代替）", n_align_failed),
         ("ランドマーク未取得数（テンプレート座標で代替）",
@@ -233,8 +246,9 @@ def _build_compare_sheet(ws, mode: str, queries: list[GalleryEntry], gallery: li
     for i, q in enumerate(queries):
         gid = group_ids[i] if group_ids else None
         gtext = f"クエリグループID:G{gid}" if gid else ""
-        _write_cell(ws, 1, i, q, _info_text(q, "クエリ", extra=gtext), show_body,
-                    fill=INVALID_FILL if q.invalid else (EXCLUDED_FILL if q.excluded_reason else QUERY_FILL))
+        fill = (INVALID_FILL if q.invalid else GATE_FILL if q.gate_excluded_reason
+                else EXCLUDED_FILL if q.excluded_reason else QUERY_FILL)
+        _write_cell(ws, 1, i, q, _info_text(q, "クエリ", extra=gtext), show_body, fill=fill)
     start = 1 + _grid_rows(len(queries), show_body) + 1  # 1行空ける
     ranks = competition_ranks([p.sim for p in pairs])
     for i, (p, rank) in enumerate(zip(pairs, ranks)):
@@ -300,7 +314,7 @@ def search_results(targets, gallery: list[GalleryEntry], aggregated: list[Pair],
             elif any(_dir_matches_spec(d, spec) for d in excluded_dirs):
                 row["message"] = EXCLUDED_DIR_MESSAGE
             else:
-                row["message"] = "比較対象フォルダに該当する人物がありません（無効画像のみの場合を含む）"
+                row["message"] = "比較対象フォルダに該当する人物がありません（無効画像・採用基準外のみの場合を含む）"
         out.append(row)
     return out
 
@@ -362,8 +376,9 @@ def build_report(path: Path, cond: ReportConditions, queries: list[GalleryEntry]
                  gallery: list[GalleryEntry], ranked: list[Pair], aggregated: list[Pair],
                  log: PhaseLogger, group_ids: list[int | None] | None = None,
                  used_queries: list[GalleryEntry] | None = None, n_align_failed: int = 0,
-                 n_landmark_missing: int | None = None) -> None:
-    """レポートを作成して保存する。ログシートは全フェーズ終了後に追記して再保存する。"""
+                 n_landmark_missing: int | None = None, n_gate_gallery: int = 0) -> None:
+    """レポートを作成して保存する。ログシートは全フェーズ終了後に追記して再保存する。
+    n_gate_gallery は顔の採用基準で比較対象から外した画像数（gallery には含まれないので別に渡す）。"""
     wb = Workbook()
     ws_cond = wb.active
     ws_cond.title = "条件"
@@ -371,7 +386,8 @@ def build_report(path: Path, cond: ReportConditions, queries: list[GalleryEntry]
     _build_conditions(ws_cond, cond, len(queries), len(gallery), n_tracks, len(ranked),
                       max((g for g in (group_ids or []) if g), default=0),
                       sum(1 for q in queries if q.invalid), n_align_failed, n_landmark_missing,
-                      sum(1 for q in queries if q.excluded_reason and not q.invalid))
+                      sum(1 for q in queries if q.excluded_reason and not q.invalid and not q.gate_excluded_reason),
+                      sum(1 for q in queries if q.gate_excluded_reason and not q.invalid), n_gate_gallery)
     with log.phase("Excel作成（シート生成・画像配置）"):
         _build_compare_sheet(wb.create_sheet("顔比較"), cond.mode, queries, gallery, ranked,
                              cond.show_body, cond.targets, group_ids, used_queries)

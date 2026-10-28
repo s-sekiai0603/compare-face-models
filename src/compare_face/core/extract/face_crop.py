@@ -4,8 +4,11 @@
   1. 顔ゲート（骨格キーポイント）: 鼻+片目以上が見えている / 下向きの顔でない / 両目間隔が極端に狭くない
   2. 顔幅に応じた適応マージンで顔 box を拡張（inflate）
   3. 小さい顔（短辺 < 96px）は周辺 ROI を長辺 800px に拡大してから切り出す
-  4. 切り出し（切り出し box の短辺が 60px 未満なら棄却）
+  4. 切り出し（品質ガード: 切り出し box の短辺が 60px 未満は premises-security では棄却）
 切り出した画像はリサイズせずに保存し、特徴量抽出時に各モデルの入力サイズへ整える。
+
+顔ゲートと品質ガードの判定結果（採用基準）は JSON に記録するだけで、本ツールは基準に外れた顔も保存する。
+基準に外れた画像を使わない判断はレポート時に行う（core/report/gate.py。既定は premises-security と同じ基準）。
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ MIN_CROP_SIDE = 60
 class FaceGate:
     ok: bool
     reason: str = ""
+    face_visible: bool = False   # 骨格ルール（鼻+片目が見える / 下向きでない）を通ったか。両目間隔比の判定はこの後
     frontal: bool = False
     face_width: float = 0.0
     eye_ratio: float | None = None
@@ -67,9 +71,12 @@ def evaluate_face_gate(face_box, kpts) -> FaceGate:
     if l_ear_down or r_ear_down:
         g.reason = "下向きの顔（耳が目より上）"
         return g
+    g.face_visible = True
     if l_ok and r_ok:
         eye_dist = float(np.linalg.norm(k[IDX_L_EYE, :2] - k[IDX_R_EYE, :2]))
-        g.eye_ratio = eye_dist / face_w
+        # JSON に記録する精度（小数 4 桁）に丸めてから判定する。レポート時の再判定（report/gate.py）と結果を一致させるため
+        # （premises-security との差は丸め誤差の範囲）
+        g.eye_ratio = round(eye_dist / face_w, 4)
         if g.eye_ratio < MIN_EYE_RATIO:
             g.reason = "両目の間隔が狭すぎる（横顔）"
             return g
@@ -140,25 +147,46 @@ def prepare_small_face_roi(frame: np.ndarray, box) -> tuple[np.ndarray, np.ndarr
     return roi_r, box_local
 
 
+def crop_min_side(box_local) -> float:
+    """切り出し box の短辺(px)。品質ガード（MIN_CROP_SIDE）の判定値で、小顔 ROI 拡大後の座標で測る。
+    JSON に記録する精度（小数 1 桁）に丸める（レポート時の再判定と結果を一致させるため）。"""
+    x1, y1, x2, y2 = map(float, np.asarray(box_local, np.float32).reshape(-1)[:4])
+    return round(min(max(1.0, x2 - x1), max(1.0, y2 - y1)), 1)
+
+
+def crop_guard_reason(min_side: float, min_crop_side: float = MIN_CROP_SIDE) -> str:
+    """品質ガードに外れる理由（短辺 < min_crop_side）。通れば空文字。"""
+    return f"切り出しが小さい（短辺 {min_side:.0f}px < {min_crop_side:g}px）" if min_side < min_crop_side else ""
+
+
 def crop_face(frame_local: np.ndarray, box_local) -> np.ndarray | None:
     """box を切り出す（AdaFaceEmbedder._crop_with_margin の margin=0 相当。リサイズはしない）。
-    box の短辺が MIN_CROP_SIDE 未満なら None。"""
+    範囲が空なら None。短辺の品質ガードは掛けない（crop_min_side で測り、呼び出し側が判定する）。"""
     h, w = frame_local.shape[:2]
     x1, y1, x2, y2 = map(float, np.asarray(box_local, np.float32).reshape(-1)[:4])
-    if min(max(1.0, x2 - x1), max(1.0, y2 - y1)) < MIN_CROP_SIDE:
-        return None
     x1, y1, x2, y2 = _clip_box(int(x1), int(y1), int(x2), int(y2), w, h)
     crop = frame_local[y1:y2 + 1, x1:x2 + 1]
     return crop if crop.size else None
 
 
-def make_face_crop(frame: np.ndarray, face_box) -> tuple[np.ndarray | None, np.ndarray]:
-    """検出顔 box(フレーム座標) → 適応マージン拡張 → 小顔 ROI 拡大 → 切り出し。
-    戻り値は (クロップ画像 or None, 拡張後の box[フレーム座標])。"""
+@dataclass
+class FaceCrop:
+    image: np.ndarray | None   # 切り出し画像（範囲が空なら None）
+    inflated: np.ndarray       # 適応マージンで拡張した box（フレーム座標）
+    min_side: float            # 切り出し box の短辺(px)。小顔 ROI 拡大後の座標（品質ガードの判定値）
+
+    @property
+    def guard_ok(self) -> bool:
+        """品質ガード（短辺 >= MIN_CROP_SIDE）。premises-security ではこれに外れると出力しない。"""
+        return self.min_side >= MIN_CROP_SIDE
+
+
+def make_face_crop(frame: np.ndarray, face_box) -> FaceCrop:
+    """検出顔 box(フレーム座標) → 適応マージン拡張 → 小顔 ROI 拡大 → 切り出し。品質ガードの判定値も返す。"""
     box = np.asarray(face_box, np.float32).reshape(-1)[:4]
     inflated = inflate_box(box, frame.shape[:2], adaptive_margin(float(box[2] - box[0])))
     frame_local, box_local = prepare_small_face_roi(frame, inflated)
-    return crop_face(frame_local, box_local), inflated
+    return FaceCrop(crop_face(frame_local, box_local), inflated, crop_min_side(box_local))
 
 
 def quality_score(face_conf: float, face_w: float) -> float:

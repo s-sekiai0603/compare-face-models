@@ -90,14 +90,14 @@ class QualityScorer:
 
 def apply_query_filter(queries: list[GalleryEntry], flt: QueryFilter, norms: list[float] | None) -> int:
     """全クエリに品質ノルムを入れ、しきい値に外れた画像に excluded_reason を入れる。外した数を返す。
-    無効画像（invalid）はもともと使わないので数えない。"""
+    無効画像（invalid）と採用基準外（gate_excluded_reason）はもともと使わないので数えない。"""
     if norms is not None:
         for q, n in zip(queries, norms):
             q.quality_norm = n
     n_excluded = 0
     for q in queries:
         q.excluded_reason = ""
-        if q.invalid:
+        if q.invalid or q.gate_excluded_reason:
             continue
         r = flt.reason(q)
         if r:

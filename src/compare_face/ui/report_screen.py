@@ -12,34 +12,15 @@ from PySide6.QtCore import Qt, Signal
 from ..core.features import visible_extractors
 from ..core.report.gallery import scan_track_folder
 from ..core.landmarks import ALIGNERS
-from ..core.pose import POSE_OPTIONS, get_pose_estimator
 from ..core.report.excel import MAX_TARGETS, MODE_IMAGE, MODE_TRACK
 from ..core.report.quality import QueryFilter
 from ..core.common.settings import load_settings, save_settings
-from .report_worker import ReportWorker, WeightsWorker
+from .report_worker import ReportWorker
+from .widgets import (
+    DropLineEdit, GateFilterRow, WeightsGuard, add_model_box, add_path_row, checked_name, fixed_label, pose_registry,
+)
 
-LABEL_WIDTH = 150
 TARGET_VISIBLE_ROWS = 5  # 探したい人物欄で最初から表示する行数（残りはスクロール）
-
-
-class DropLineEdit(QLineEdit):
-    """ファイル/フォルダのドラッグ&ドロップを受け付ける読み取り専用の入力欄。"""
-
-    def __init__(self, on_drop, placeholder: str):
-        super().__init__()
-        self.on_drop = on_drop
-        self.setReadOnly(True)
-        self.setAcceptDrops(True)
-        self.setPlaceholderText(placeholder)
-
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        urls = e.mimeData().urls()
-        if urls:
-            self.on_drop(urls[0].toLocalFile())
 
 
 class ReportScreen(QWidget):
@@ -49,14 +30,21 @@ class ReportScreen(QWidget):
         super().__init__()
         self.settings = load_settings()
         self.worker: ReportWorker | None = None
-        self.weights_worker: WeightsWorker | None = None   # 最新の確認スレッド（結果を採用するのはこれだけ）
-        self._weights_workers: list[WeightsWorker] = []    # 実行中のスレッドを終了まで保持する（途中破棄を防ぐ）
-        self.weights_ok = False
 
         root = QVBoxLayout(self)
         title = QLabel("顔特徴量比較レポート出力")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         root.addWidget(title)
+
+        # 状態表示・ボタン（モデル選択の toggled から重み確認が走るので先に作り、レイアウトには最後に足す）
+        self.guide = QPlainTextEdit()
+        self.guide.setReadOnly(True)
+        self.guide.setMaximumHeight(110)
+        self.guide.hide()
+        self.btn_start = QPushButton("レポート作成開始")
+        self.btn_back = QPushButton("戻る")
+        self.status = QLabel("")
+        self.weights = WeightsGuard(self.status, self.guide, self.btn_start, self.btn_back, lambda: self.worker is not None)
 
         # クエリ指定方法
         row = QHBoxLayout()
@@ -149,6 +137,10 @@ class ReportScreen(QWidget):
         row.addStretch()
         root.addLayout(row)
 
+        # 顔の採用基準（抽出時の顔ゲート・品質ガードをレポート時に再判定。クエリ・比較対象の両方に適用）
+        self.gate_row = GateFilterRow(self.settings)
+        root.addWidget(self.gate_row)
+
         # 探したい人物（該当画像をレポートでピンク表示）。5件分を表示し、残りは縦スクロール
         tbox = QGroupBox(f"探したい人物（最大{MAX_TARGETS}件・該当画像をピンク表示）")
         tlay = QVBoxLayout(tbox)
@@ -198,29 +190,14 @@ class ReportScreen(QWidget):
             root, "顔特徴量抽出モデル", visible_extractors(), self.settings["report_model"])
         self.landmark_group, self.landmark_buttons = self._model_box(
             root, "顔ランドマークモデル（特徴量抽出前のアライン）", ALIGNERS, self.settings["report_landmark"])
-        def _pose_description(name: str) -> str:
-            est = get_pose_estimator(name)   # 生成だけ（重みの読込はしない）
-            if est is None:
-                return "頭部姿勢を表示しない"
-            return f"{est.name} の重み {est.weights_path().name}（情報欄に yaw/pitch/roll を表示）"
-
-        pose_registry = {name: type("_Pose", (), {"description": _pose_description(name)}) for name in POSE_OPTIONS}
         self.pose_group, self.pose_buttons = self._model_box(
-            root, "頭部姿勢（情報欄に yaw/pitch/roll を表示）", pose_registry, self.settings["report_pose"])
+            root, "頭部姿勢（情報欄に yaw/pitch/roll を表示）", pose_registry("情報欄に yaw/pitch/roll を表示"), self.settings["report_pose"])
 
-        self.guide = QPlainTextEdit()
-        self.guide.setReadOnly(True)
-        self.guide.setMaximumHeight(110)
-        self.guide.hide()
         root.addWidget(self.guide)
-
-        self.btn_start = QPushButton("レポート作成開始")
-        self.btn_back = QPushButton("戻る")
         brow = QHBoxLayout()
         brow.addWidget(self.btn_back)
         brow.addWidget(self.btn_start, 1)
         root.addLayout(brow)
-        self.status = QLabel("")
         root.addWidget(self.status)
         root.addStretch()
 
@@ -242,47 +219,24 @@ class ReportScreen(QWidget):
     # ---- UI部品 ----
     @staticmethod
     def _label(text: str) -> QLabel:
-        lb = QLabel(text)
-        lb.setFixedWidth(LABEL_WIDTH)
-        return lb
+        return fixed_label(text)
 
     def _row(self, parent: QVBoxLayout, label: str, edit: QLineEdit, slot) -> QPushButton:
-        row = QHBoxLayout()
-        row.addWidget(self._label(label))
-        row.addWidget(edit, 1)
-        btn = QPushButton("参照...")
-        btn.clicked.connect(slot)
-        row.addWidget(btn)
-        parent.addLayout(row)
-        return btn
+        return add_path_row(parent, label, edit, slot)
 
     def _model_box(self, parent: QVBoxLayout, title: str, registry: dict, saved: str
                    ) -> tuple[QButtonGroup, dict[str, QRadioButton]]:
-        """レジストリの各モデルをラジオボタンで並べる。説明はツールチップに表示する。"""
-        box = QGroupBox(title)
-        bl = QHBoxLayout(box)
-        group = QButtonGroup(self)
-        buttons: dict[str, QRadioButton] = {}
-        for i, (name, cls) in enumerate(registry.items()):
-            rb = QRadioButton(name)
-            rb.setToolTip(getattr(cls, "description", "") or name)
-            rb.setChecked(name == saved or (i == 0 and saved not in registry))
-            group.addButton(rb)
-            buttons[name] = rb
-            bl.addWidget(rb)
-            rb.toggled.connect(self._on_model_changed)
-        bl.addStretch()
-        parent.addWidget(box)
-        return group, buttons
+        """レジストリの各モデルをラジオボタンで並べる（widgets.add_model_box）。"""
+        return add_model_box(self, parent, title, registry, saved, self._on_model_changed)
 
     def selected_model(self) -> str:
-        return next(n for n, b in self.model_buttons.items() if b.isChecked())
+        return checked_name(self.model_buttons)
 
     def selected_landmark(self) -> str:
-        return next(n for n, b in self.landmark_buttons.items() if b.isChecked())
+        return checked_name(self.landmark_buttons)
 
     def selected_pose(self) -> str:
-        return next(n for n, b in self.pose_buttons.items() if b.isChecked())
+        return checked_name(self.pose_buttons)
 
     # ---- モードと入力 ----
     def _on_mode_toggled(self) -> None:
@@ -313,12 +267,14 @@ class ReportScreen(QWidget):
             if not quiet:
                 QMessageBox.warning(self, "追跡IDフォルダ", "フォルダを指定してください。")
             return
-        n = len(scan_track_folder(p))
+        entries = scan_track_folder(p)
+        n = len(entries)
         if n == 0 and not quiet:
             QMessageBox.warning(self, "追跡IDフォルダ", "顔画像(_face.jpg)が見つかりません。追跡IDフォルダを指定してください。")
             return
         self.track_edit.setText(str(p))
-        self.track_info.setText(f"検出件数: 顔 {n}件")
+        n_rej = sum(1 for e in entries if not e.gate_ok)
+        self.track_info.setText(f"検出件数: 顔 {n}件" + (f"（うち抽出時の採用基準外 {n_rej}件）" if n_rej else ""))
 
     def _pick_track_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "追跡IDフォルダを選択", self.track_edit.text())
@@ -336,52 +292,13 @@ class ReportScreen(QWidget):
             self.out_edit.setText(d)
 
     # ---- 重みの確認 ----
-    def _on_model_changed(self) -> None:
-        if self.sender() is None or self.sender().isChecked():
+    def _on_model_changed(self, checked: bool = True) -> None:
+        if checked:
             self._start_weights_check()
 
     def _start_weights_check(self) -> None:
-        """選択中のモデルの重みを別スレッドで確認（無ければ自動取得）する。
-        確認中にモデルを切り替えた場合は新しいスレッドを起動し、古いスレッドの結果は無視する
-        （古いスレッドは終了まで保持し、実行中の QThread が破棄されないようにする）。"""
-        self.weights_ok = False
-        self.guide.hide()
-        self.btn_start.setEnabled(False)
-        self.btn_back.setEnabled(False)  # 確認スレッド実行中は戻れない
-        self.status.setText("モデルの重みを確認しています...")
-        worker = WeightsWorker(self.selected_model(), self.selected_landmark(), self.selected_pose())
-        worker.status.connect(lambda msg, w=worker: self._on_weights_status(w, msg))
-        worker.ready.connect(lambda w=worker: self._on_weights_ready(w))
-        worker.unavailable.connect(lambda msg, w=worker: self._on_weights_unavailable(w, msg))
-        worker.finished.connect(lambda w=worker: self._on_weights_finished(w))
-        self._weights_workers.append(worker)
-        self.weights_worker = worker
-        worker.start()
-
-    def _on_weights_status(self, w: WeightsWorker, msg: str) -> None:
-        if w is self.weights_worker:
-            self.status.setText(msg)
-
-    def _on_weights_ready(self, w: WeightsWorker) -> None:
-        if w is not self.weights_worker:
-            return
-        self.weights_ok = True
-        self.status.setText("")
-        self.btn_start.setEnabled(self.worker is None)
-
-    def _on_weights_unavailable(self, w: WeightsWorker, msg: str) -> None:
-        if w is not self.weights_worker:
-            return
-        self.status.setText("モデルの重みが見つかりません。下記の手順で配置してください。")
-        self.guide.setPlainText(msg)
-        self.guide.show()
-
-    def _on_weights_finished(self, w: WeightsWorker) -> None:
-        if w in self._weights_workers:
-            self._weights_workers.remove(w)
-        w.deleteLater()
-        if not self._weights_workers:  # 古い確認スレッド（取得中など）も含めて全て終わったら戻れる
-            self.btn_back.setEnabled(self.worker is None)
+        """選択中のモデルの重みを別スレッドで確認する（widgets.WeightsGuard）。"""
+        self.weights.check(self.selected_model(), self.selected_landmark(), self.selected_pose())
 
     def _split_pipe_values(self, index: int) -> None:
         """カメラID欄に「|」区切りで入力された値を、カメラID|映像ファイル名|追跡ID に振り分ける。"""
@@ -435,6 +352,7 @@ class ReportScreen(QWidget):
                             for c, v, t in self.target_edits],
             report_model=self.selected_model(), report_landmark=self.selected_landmark(),
             report_pose=self.selected_pose())
+        self.gate_row.save_to(self.settings)
         save_settings(self.settings)
         self.worker = ReportWorker(
             model_name=self.selected_model(), landmark_name=self.selected_landmark(),
@@ -444,7 +362,8 @@ class ReportScreen(QWidget):
             limit=self.limit_spin.value(), targets=self._targets(),
             merge_sec=0.0 if image_mode else self.merge_spin.value(), pose_name=self.selected_pose(),
             include_excluded=self.cb_include_old.isChecked(),
-            query_filter=QueryFilter(self.conf_spin.value(), self.norm_spin.value(), float(self.width_spin.value())))
+            query_filter=QueryFilter(self.conf_spin.value(), self.norm_spin.value(), float(self.width_spin.value())),
+            gate_filter=self.gate_row.value())
         self.worker.progress.connect(self.status.setText)
         self.worker.finished_ok.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)
@@ -452,7 +371,7 @@ class ReportScreen(QWidget):
         self.worker.start()
 
     def _set_running(self, running: bool) -> None:
-        self.btn_start.setEnabled(not running and self.weights_ok)
+        self.btn_start.setEnabled(not running and self.weights.ok)
         self.btn_back.setEnabled(not running)
 
     def _on_finished(self, path: str) -> None:
