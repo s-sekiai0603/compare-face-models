@@ -42,6 +42,7 @@ class GalleryEntry:
     person_conf: float | None = None
     face_conf: float | None = None     # 顔検出の信頼度
     face_width: float | None = None    # 検出顔boxの幅(px)
+    face_height: float | None = None   # 検出顔boxの高さ(px)
     eye_ratio: float | None = None     # 両目間隔/顔幅（正面度。片目のみ検出時は None）
     frontal: bool | None = None        # 正面とみなしたか（eye_ratio >= 0.25）
     quality: float | None = None       # 品質スコア（顔信頼度 + min(10, 顔幅/10)）
@@ -109,6 +110,14 @@ class _TrackMetaCache:
         return self._cache[track_dir]
 
 
+def _bbox_side(bbox, axis: int) -> float | None:
+    """xyxy の bbox から幅（axis=0）/ 高さ（axis=1）を求める。bbox が無い・不正なら None。"""
+    try:
+        return round(float(bbox[axis + 2]) - float(bbox[axis]), 1)
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _make_entry(face: Path, cache: _TrackMetaCache) -> GalleryEntry | None:
     m = _FACE_RE.match(face.name)
     if not m:
@@ -135,7 +144,8 @@ def _make_entry(face: Path, cache: _TrackMetaCache) -> GalleryEntry | None:
         video_file=meta.get("video_file") or f"{video_dir.name}.mp4",
         person_conf=im.get("person_conf"),
         face_conf=im.get("face_conf"),
-        face_width=im.get("face_width"),
+        face_width=im.get("face_width") if im.get("face_width") is not None else _bbox_side(im.get("face_bbox_xyxy"), 0),
+        face_height=im.get("face_height") if im.get("face_height") is not None else _bbox_side(im.get("face_bbox_xyxy"), 1),
         eye_ratio=im.get("eye_ratio"),
         frontal=im.get("frontal"),
         quality=im.get("quality"),

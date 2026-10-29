@@ -40,6 +40,7 @@
 | `core/features/` | 顔特徴量モデルのレジストリ（`base.py` の `FaceFeatureExtractor` を継承して `@register`）: AdaFace / CVLFace / LAFS / FSPFM。`*_net.py` は元コードから移植したネットワーク定義 |
 | `core/pose/` | 頭部姿勢のレジストリ（`__init__.py` の `POSE_OPTIONS`）: HopeNet（`hopenet.py`。FSPFM の姿勢入力にも使う）/ 6DRepNet（`sixdrepnet.py`、RepVGG-B1g2 の移植）。レポートの yaw/pitch/roll 表示に使う |
 | `core/report/` | レポートパイプライン: `pipeline.py`（アライン → 特徴量 → 類似度 → Excel）, `gallery.py`, `merge.py`, `similarity.py`, `excel.py`, `cache.py`（比較対象の特徴量キャッシュ）, `quality.py`（クエリ自動選別と品質ノルム）, `gate.py`（顔の採用基準 = 抽出時の顔ゲート・品質ガードの再判定）, `query_set.py` / `query_set_excel.py`（検索元セット検索: 顔画像出力先\検索元\<セット名> にコピーした N 枚の総当たりと比較対象全体での順位。元画像はバイト一致で特定） |
+| `core/report/verify_face_size.py` / `verify_face_size_excel.py` | 顔サイズ別精度検証（追跡IDフォルダ 1〜10 の顔画像を顔 bbox サイズ順に並べた類似度 Excel。画面は `ui/verify_face_size_screen.py`、入力内容は `verify_face_size_screen_setting.json`（Git 管理外）に保存。誤識別の枚数レポート = 対象者の画像ごとに、指定追跡ID以外（非対象者）のうち列の対象者より似ている画像の数。詳細は同名の `.txt`） |
 | `core/eval/` | 精度の検証: `verification.py`（.bin 読込、insightface と同じ 10 分割交差検証）, `pipeline.py`（モデル × ランドマークの一括評価と CSV）, `published.py`（論文・README の公表値と出典） |
 
 ### モデル重みの置き場所（`models/`、Git 管理外）

@@ -8,6 +8,7 @@ class TopScreen(QWidget):
     extract_requested = Signal()
     report_requested = Signal()
     query_set_requested = Signal()
+    verify_face_size_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -19,10 +20,12 @@ class TopScreen(QWidget):
         btn_extract = QPushButton("顔画像抽出")
         btn_report = QPushButton("レポート出力")
         btn_query_set = QPushButton("検索元セット検索（総当たり・全体検索）")
-        for b in (btn_extract, btn_report, btn_query_set):
+        btn_verify = QPushButton("顔サイズ別精度検証")
+        for b in (btn_extract, btn_report, btn_query_set, btn_verify):
             b.setMinimumHeight(48)
             layout.addWidget(b)
         layout.addStretch()
         btn_extract.clicked.connect(self.extract_requested.emit)
         btn_report.clicked.connect(self.report_requested.emit)
         btn_query_set.clicked.connect(self.query_set_requested.emit)
+        btn_verify.clicked.connect(self.verify_face_size_requested.emit)

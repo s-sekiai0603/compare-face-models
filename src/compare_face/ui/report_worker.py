@@ -7,6 +7,7 @@ from ..core.landmarks import get_aligner
 from ..core.pose import get_pose_estimator
 from ..core.report.pipeline import run_report
 from ..core.report.query_set import run_query_set_search
+from ..core.report.verify_face_size import run_verify_face_size
 
 
 class WeightsWorker(QThread):
@@ -64,6 +65,24 @@ class QuerySetWorker(QThread):
     def run(self) -> None:
         try:
             out, _ = run_query_set_search(progress=self.progress.emit, **self.kwargs)
+            self.finished_ok.emit(str(out))
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class VerifyFaceSizeWorker(QThread):
+    """顔サイズ別精度検証（verify_face_size.run_verify_face_size）を別スレッドで実行する。"""
+    progress = Signal(str)
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+
+    def run(self) -> None:
+        try:
+            out, _ = run_verify_face_size(progress=self.progress.emit, **self.kwargs)
             self.finished_ok.emit(str(out))
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")

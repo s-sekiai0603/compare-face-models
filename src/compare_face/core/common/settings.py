@@ -57,3 +57,37 @@ def save_settings(settings: dict, path: Path = SETTINGS_PATH) -> None:
         path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+# ---- 顔サイズ別精度検証画面の設定（画面専用のファイル。入力内容をすべて保存して次回起動時に復元する） ----
+VERIFY_FACE_SIZE_SETTINGS_PATH = PROJECT_ROOT / "verify_face_size_screen_setting.json"
+VERIFY_FACE_SIZE_TRACK_COUNT = 10  # 検証対象人物の追跡IDフォルダの数
+
+VERIFY_FACE_SIZE_DEFAULTS = {
+    "output_mode": "similarity",      # similarity（同一人物の類似度）/ misidentify（誤識別の枚数）/ both
+    "track_dirs": [""] * VERIFY_FACE_SIZE_TRACK_COUNT,
+    "gallery_dir": "",                # 比較対象フォルダ（誤識別となる画像の枚数レポートで使う）
+    "output_dir": "",
+    "model": "AdaFace",
+    "landmark": "なし",
+    "face_gate": True,
+    "min_eye_ratio": 0.05,
+    "min_crop_side": 60,
+}
+
+
+def load_verify_face_size_settings(path: Path = VERIFY_FACE_SIZE_SETTINGS_PATH) -> dict:
+    data = {**VERIFY_FACE_SIZE_DEFAULTS, "track_dirs": list(VERIFY_FACE_SIZE_DEFAULTS["track_dirs"])}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data.update({k: loaded[k] for k in data if k in loaded})
+    except (OSError, ValueError):
+        pass
+    dirs = [str(d) for d in data["track_dirs"]] if isinstance(data["track_dirs"], list) else []
+    data["track_dirs"] = (dirs + [""] * VERIFY_FACE_SIZE_TRACK_COUNT)[:VERIFY_FACE_SIZE_TRACK_COUNT]
+    return data
+
+
+def save_verify_face_size_settings(settings: dict, path: Path = VERIFY_FACE_SIZE_SETTINGS_PATH) -> None:
+    save_settings(settings, path)
