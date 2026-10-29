@@ -308,6 +308,7 @@ JSON は追跡IDフォルダごとに 1 ファイルで、画像ごとに次の�
 | `face_crop_xyxy` | 適応マージンで拡張した切り出し範囲（`_face.jpg` の範囲） |
 | `face_source` | `frame`=フレーム全体の顔検出 / `body_crop`=全身クロップでの再検出 |
 | `face_width` / `face_height` | 検出顔 box のサイズ(px) |
+| `foot_xy` / `foot_source` | 足元の点 `[x, y]`（フレーム座標）。左右の足首キーポイント（信頼度 0.15 以上）の平均で `foot_source` は `ankle`。取れなければ全身 box の下辺中央で `bbox_bottom` |
 | `gate_ok` / `gate_reason` | 採用基準（顔ゲート + 品質ガード）を通ったか（= premises-security が出力する顔か）と、外れた理由 |
 | `face_visible` | 顔ゲートの骨格ルール（鼻+片目が見える / 下向きでない）を通ったか |
 | `crop_min_side` | 切り出し box の短辺(px)。品質ガード（60px）の判定値（小顔拡大後の座標） |

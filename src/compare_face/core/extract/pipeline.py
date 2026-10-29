@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 
 from .tracker import PersonTracker, TrackedPerson
-from .face_crop import attach_faces, crop_guard_reason, evaluate_face_gate, make_face_crop, quality_score
+from .face_crop import KP_CONF_TH, attach_faces, crop_guard_reason, evaluate_face_gate, make_face_crop, quality_score
 from .face_detector import FaceDetector
 from ..common.imageio import imwrite
 from .pose_detector import BATCH_SIZE, PoseDetector
@@ -194,6 +194,22 @@ def _round_or_none(v, nd: int):
     return None if v is None else round(float(v), nd)
 
 
+IDX_L_ANKLE, IDX_R_ANKLE = 15, 16
+
+
+def _foot_point(kpts, body_xyxy) -> tuple[list[float], str]:
+    """全身骨格の足元の点（フレーム座標）と、その由来（"ankle" / "bbox_bottom"）を返す。
+    足首（左右）のうち信頼度が KP_CONF_TH 以上のものの平均。両方取れなければ全身 bbox の下辺中央。"""
+    k = None if kpts is None else np.asarray(kpts, np.float32)
+    if k is not None and k.ndim == 2 and k.shape[0] > IDX_R_ANKLE and k.shape[1] >= 3:
+        pts = [k[i, :2] for i in (IDX_L_ANKLE, IDX_R_ANKLE) if k[i, 2] >= KP_CONF_TH]
+        if pts:
+            x, y = np.mean(pts, axis=0)
+            return [round(float(x), 2), round(float(y), 2)], "ankle"
+    x1, y1, x2, y2 = body_xyxy
+    return [round((x1 + x2) / 2, 2), float(y2)], "bbox_bottom"
+
+
 def extract_video(
     video_path: Path,
     out_dir: Path,
@@ -275,6 +291,7 @@ def extract_video(
                     if bx2 > bx1 and by2 > by1:
                         f_body = f"{ts}_body.jpg"
                         writer.submit(tid_dir / f_body, frame[by1:by2, bx1:bx2])
+                    foot_xy, foot_source = _foot_point(p.kpts, (bx1, by1, bx2, by2))
                     (last_out if kind == OUTPUT_ACCEPTED else last_rej)[p.track_id] = cur_sec
                     records.setdefault(p.track_id, []).append({
                         "file_face": f_face,
@@ -290,6 +307,8 @@ def extract_video(
                         "face_source": src,
                         "face_width": round(gate.face_width, 1),
                         "face_height": round(float(fbox[3] - fbox[1]), 1),
+                        "foot_xy": foot_xy,                                   # 足元の点 [x, y]（フレーム座標）
+                        "foot_source": foot_source,                           # "ankle"=足首キーポイント / "bbox_bottom"=全身bbox下辺中央
                         "gate_ok": gate_ok,                                   # 採用基準（顔ゲート + 品質ガード）を通ったか
                         "gate_reason": gate.reason or crop_guard_reason(fc.min_side),  # 外れた理由（通れば空）
                         "face_visible": gate.face_visible,                   # 骨格ルール（鼻+片目 / 下向きでない）を通ったか
