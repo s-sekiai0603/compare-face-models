@@ -5,9 +5,11 @@ import sys
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 
 from .ui.extract_screen import ExtractScreen
+from .ui.face_size_map_screen import FaceSizeMapScreen
 from .ui.query_set_screen import QuerySetScreen
 from .ui.report_screen import ReportScreen
 from .ui.top_screen import TopScreen
+from .ui.verify_face_size_screen import VerifyFaceSizeScreen
 
 
 class MainWindow(QMainWindow):
@@ -22,6 +24,8 @@ class MainWindow(QMainWindow):
         self.top.extract_requested.connect(self.show_extract)
         self.top.report_requested.connect(self.show_report)
         self.top.query_set_requested.connect(self.show_query_set)
+        self.top.verify_face_size_requested.connect(self.show_verify_face_size)
+        self.top.face_size_map_requested.connect(self.show_face_size_map)
 
     def show_extract(self) -> None:
         # 画面を開くたびに生成し、前回保存した値を既定表示にする
@@ -38,6 +42,18 @@ class MainWindow(QMainWindow):
 
     def show_query_set(self) -> None:
         screen = QuerySetScreen()
+        screen.back_requested.connect(lambda: self._back(screen))
+        self.stack.addWidget(screen)
+        self.stack.setCurrentWidget(screen)
+
+    def show_verify_face_size(self) -> None:
+        screen = VerifyFaceSizeScreen()
+        screen.back_requested.connect(lambda: self._back(screen))
+        self.stack.addWidget(screen)
+        self.stack.setCurrentWidget(screen)
+
+    def show_face_size_map(self) -> None:
+        screen = FaceSizeMapScreen()
         screen.back_requested.connect(lambda: self._back(screen))
         self.stack.addWidget(screen)
         self.stack.setCurrentWidget(screen)
