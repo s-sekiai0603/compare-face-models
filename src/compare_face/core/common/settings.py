@@ -64,7 +64,7 @@ VERIFY_FACE_SIZE_SETTINGS_PATH = PROJECT_ROOT / "verify_face_size_screen_setting
 VERIFY_FACE_SIZE_TRACK_COUNT = 10  # 検証対象人物の追跡IDフォルダの数
 
 VERIFY_FACE_SIZE_DEFAULTS = {
-    "output_mode": "similarity",      # similarity（同一人物の類似度）/ misidentify（誤識別の枚数）/ both
+    "output_mode": "similarity",      # similarity（同一人物の類似度）/ misidentify（誤識別の枚数）/ rank（類似度順位）/ both（すべて）
     "track_dirs": [""] * VERIFY_FACE_SIZE_TRACK_COUNT,
     "gallery_dir": "",                # 比較対象フォルダ（誤識別となる画像の枚数レポートで使う）
     "output_dir": "",

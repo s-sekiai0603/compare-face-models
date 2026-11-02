@@ -16,7 +16,7 @@ from compare_face.core.report.verify_face_size import (
     collect_entries, report_filename, run_verify_face_size, runs_similarity_report, sort_entries,
 )
 from compare_face.core.report.verify_face_size_excel import (
-    FIRST_COL, FIRST_ROW, INFO_SHEET_NAME, SIM_BINS, SHEET_NAME, sim_fill,
+    FIRST_COL, FIRST_ROW, INFO_SHEET_NAME, RANK_SHEET_NAME, SIM_BINS, SHEET_NAME, sim_fill,
 )
 from test_query_set import _MeanExtractor
 
@@ -30,6 +30,8 @@ def _track(root, cam, video, tid, faces):
         rng = np.random.default_rng(abs(hash((cam, tid, ts))) % 10000)
         assert imwrite(d / f"{ts}_face.jpg", rng.integers(0, 255, (40, 36, 3), np.uint8))
         im = {"file_face": f"{ts}_face.jpg", "gate_ok": True}
+        if ts.endswith("_000001_000"):
+            im["face_conf"] = 0.91234   # 一部の画像だけ信頼度あり（なしは「-」になる）
         if size is not None:
             im["face_bbox_xyxy"] = [10, 5, 10 + size[0], 5 + size[1]]
         images.append(im)
@@ -89,8 +91,8 @@ def test_run_end_to_end_layout(tmp_path, monkeypatch):
     assert [ws.cell(row=11, column=FIRST_COL + j).value for j in range(3)] == [40.0, 60.0, 80.0]
     assert [ws.cell(row=10, column=FIRST_COL + j).value for j in range(3)] == [30.0, 45.0, 60.0]
     assert [ws.cell(row=7, column=FIRST_COL + j).value for j in range(3)] == ["1", "2", "1"]
-    assert [ws.cell(row=FIRST_ROW + i, column=3).value for i in range(3)] == ["1", "2", "1"]          # 縦側 C 列 = 追跡ID
-    assert [ws.cell(row=FIRST_ROW + i, column=4).value for i in range(3)] == ["v1.mp4", "v2.mp4", "v1.mp4"]  # D 列 = 映像
+    assert [ws.cell(row=FIRST_ROW + i, column=3).value for i in range(3)] == ["v1.mp4", "v2.mp4", "v1.mp4"]  # 縦側 C 列 = 映像
+    assert [ws.cell(row=FIRST_ROW + i, column=4).value for i in range(3)] == ["1", "2", "1"]          # D 列 = 追跡ID
     assert [ws.cell(row=FIRST_ROW + i, column=7).value for i in range(3)] == [30.0, 45.0, 60.0]
     assert [ws.cell(row=FIRST_ROW + i, column=8).value for i in range(3)] == [40.0, 60.0, 80.0]
     assert ws.cell(row=9, column=FIRST_COL).value is None and ws.cell(row=FIRST_ROW, column=6).value is None  # 顔の向きは空欄
@@ -172,13 +174,72 @@ def test_run_misidentify_and_both(tmp_path, monkeypatch):
     for i, j in ((0, 1), (1, 0)):
         v = ws.cell(row=FIRST_ROW + i, column=FIRST_COL + j).value
         assert isinstance(v, int) and 0 <= v <= 3
-    txt = out.with_suffix(".txt")
-    assert txt.is_file()
+    assert not out.with_suffix(".txt").exists()   # 一覧テキストはサイズが大きくなりすぎるため出力しない
     cond = {r[0]: r[1] for r in wb["条件"].iter_rows(values_only=True)}
-    assert cond["非対象者の画像数"] == 3 and cond["誤認した画像の一覧（テキスト）"] == txt.name
+    assert cond["非対象者の画像数"] == 3
 
     out2, _ = run_verify_face_size([a], tmp_path / "rep2", "AdaFace", "なし", mode="both", gallery_dir=f, echo=lambda m: None)
-    assert openpyxl.load_workbook(out2).sheetnames[:3] == [INFO_SHEET_NAME, SHEET_NAME, MISIDENTIFY_SHEET_NAME]
+    assert openpyxl.load_workbook(out2).sheetnames[:4] == [INFO_SHEET_NAME, SHEET_NAME, MISIDENTIFY_SHEET_NAME, RANK_SHEET_NAME]
+
+
+def test_rank_matrix_counts_track_ids_once():
+    from compare_face.core.report.verify_face_size import rank_matrix
+    ang = lambda d: [np.cos(np.radians(d)), np.sin(np.radians(d))]
+    t = np.array([ang(0), ang(30), ang(90)], np.float32)
+    # 非対象者: 追跡ID "A" が 10°・20°（どちらも高い → 1 件）、"B" が 50°、"C" が 100°
+    g = np.array([ang(10), ang(20), ang(50), ang(100)], np.float32)
+    keys = ["A", "A", "B", "C"]
+    r = rank_matrix(t, g, keys)
+    assert r[0, 1] == 1 + 1    # 行 0°: cos30=0.866 より高いのは A のみ（10°,20° は同じ追跡ID）
+    assert r[0, 2] == 1 + 2    # cos90=0 より高いのは A, B（C は cos100<0）
+    assert r[1, 0] == 1 + 2    # 行 30°: cos30 より高いのは A(20°→cos10), B(50°→cos20)
+    assert np.all(np.diag(r) == 0)
+    # 非対象者が空なら全部 1 位（対角は 0）
+    e = rank_matrix(t, np.zeros((0, 2), np.float32), [])
+    assert e[0, 1] == 1 and e[1, 1] == 0
+    # 同値は数えない
+    t2 = np.array([[1.0, 0.0], [0.0, 1.0]], np.float32)
+    assert rank_matrix(t2, np.array([[0.0, 1.0]], np.float32), ["X"])[0, 1] == 1
+
+
+def test_rank_bins_and_colors():
+    from compare_face.core.report.verify_face_size_excel import RANK_BINS, rank_bin, rank_fill
+    ranks = (1, 2, 3, 4, 5, 6, 10, 11, 20, 21, 50, 51, 10**6)
+    assert [rank_bin(r) for r in ranks] == [0, 1, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7]
+    assert len({rank_fill(r).fgColor.rgb for r in (1, 2, 3, 4, 6, 11, 21, 51)}) == len(RANK_BINS)
+    assert rank_fill(1).fgColor.rgb == "FF63BE7B"
+
+
+def test_run_rank_modes(tmp_path, monkeypatch):
+    import compare_face.core.report.verify_face_size as vfs
+    from compare_face.core.report.verify_face_size_excel import MISIDENTIFY_SHEET_NAME
+    assert vfs.runs_rank_report("rank") and vfs.runs_rank_report("both") and not vfs.runs_rank_report("similarity")
+    assert vfs.needs_gallery("rank") and vfs.needs_gallery("misidentify") and not vfs.needs_gallery("similarity")
+    assert vfs.OUTPUT_MODES["both"] == "すべて" and "rank" in vfs.OUTPUT_MODES
+    calls = []
+    orig = vfs.embed_entries
+    monkeypatch.setattr(vfs, "embed_entries", lambda *a, **k: (calls.append(len(a[2])), orig(*a, **k))[1])
+    monkeypatch.setattr(vfs, "get_extractor", lambda name: _MeanExtractor())
+    f = tmp_path / "f"
+    a = _track(f, "Cam1", "v1", 1, [("20260311_000001_000", (60, 80)), ("20260311_000002_000", (30, 40))])
+    _track(f, "Cam2", "v2", 2, [("20260311_000003_000", (45, 60)), ("20260311_000004_000", (46, 61))])
+    _track(f, "Cam3", "v3", 3, [("20260311_000005_000", (47, 62))])
+    with pytest.raises(ValueError):
+        run_verify_face_size([a], tmp_path / "r0", "AdaFace", "なし", mode="rank", echo=lambda m: None)
+    out, _ = run_verify_face_size([a], tmp_path / "r1", "AdaFace", "なし", mode="rank", gallery_dir=f, echo=lambda m: None)
+    wb = openpyxl.load_workbook(out)
+    assert wb.sheetnames[:2] == [INFO_SHEET_NAME, RANK_SHEET_NAME] and SHEET_NAME not in wb.sheetnames
+    ws = wb[RANK_SHEET_NAME]
+    assert ws.cell(row=FIRST_ROW, column=FIRST_COL).value is None
+    for i, j in ((0, 1), (1, 0)):
+        v = ws.cell(row=FIRST_ROW + i, column=FIRST_COL + j).value
+        assert isinstance(v, int) and 1 <= v <= 3     # 非対象者の追跡IDは 2 件 → 最大 3 位
+    cond = {r[0]: r[1] for r in wb["条件"].iter_rows(values_only=True)}
+    assert cond["非対象者の画像数"] == 3 and cond["非対象者の追跡ID数"] == 2
+    # すべて: 比較対象の特徴量計算は 1 回だけ（非対象者 3 枚 + 対象者 2 枚の計 2 回の embed_entries）
+    calls.clear()
+    run_verify_face_size([a], tmp_path / "r2", "AdaFace", "なし", mode="both", gallery_dir=f, echo=lambda m: None)
+    assert calls == [3, 2]
 
 
 def test_misidentify_log_lists_images(tmp_path):
@@ -210,22 +271,24 @@ def test_info_sheet_layout_formula_images_and_order(tmp_path, monkeypatch):
     assert imwrite(body, np.random.default_rng(1).integers(0, 255, (120, 50, 3), np.uint8))  # 縦長の全身画像
     out, _ = run_verify_face_size([a, b, c], tmp_path / "rep", "AdaFace", "なし", echo=lambda m: None)
     ws = openpyxl.load_workbook(out)[INFO_SHEET_NAME]
-    heads = [ws.cell(row=2, column=k).value for k in range(2, 12)]
-    assert heads[0] == "キー情報" and heads[5] == "顔の向き" and heads[-2:] == ["全身画像", "顔画像"]
-    # 並び: カメラID → 追跡ID（数値）→ 映像 → 画像ファイル名
+    heads = [ws.cell(row=2, column=k).value for k in range(2, 13)]
+    assert heads[0] == "キー情報" and heads[5] == "顔の向き" and heads[-3:] == ["顔の信頼度", "全身画像", "顔画像"]
+    # 並び: カメラID → 追跡ID（数値）→ 映像 → 画像ファイル名（列は カメラID・映像・追跡ID・画像ファイル名）
     rows = [[ws.cell(row=r, column=k).value for k in range(3, 7)] for r in range(3, 7)]
-    assert rows == [["Cam1", "9", "v2.mp4", "20260311_000004_000_face.jpg"], ["Cam1", "9", "v9.mp4", "20260311_000003_000_face.jpg"],
-                    ["Cam2", "10", "v1.mp4", "20260311_000001_000_face.jpg"], ["Cam2", "10", "v1.mp4", "20260311_000002_000_face.jpg"]]
+    assert rows == [["Cam1", "v2.mp4", "9", "20260311_000004_000_face.jpg"], ["Cam1", "v9.mp4", "9", "20260311_000003_000_face.jpg"],
+                    ["Cam2", "v1.mp4", "10", "20260311_000001_000_face.jpg"], ["Cam2", "v1.mp4", "10", "20260311_000002_000_face.jpg"]]
     assert ws["B3"].value == '=C3&"|"&D3&"|"&E3&"|"&F3' and ws["B6"].value == '=C6&"|"&D6&"|"&E6&"|"&F6'
     assert ws["G5"].value is None                                   # 顔の向きは空欄
     assert (ws["H5"].value, ws["I5"].value) == (60.0, 80.0)         # 画像サイズ = 顔 bbox の幅・高さ
-    assert ws.auto_filter.ref == "B2:K6"
+    # 顔の信頼度は J 列（JSON の face_conf を小数 4 桁。無いものは「-」）
+    assert [ws.cell(row=r, column=10).value for r in range(3, 7)] == ["-", "-", 0.9123, "-"]
+    assert ws.auto_filter.ref == "B2:L6"
     assert len(ws._images) == 5   # 顔画像 4 枚 + 全身画像 1 枚（_body.jpg があるのは 1 件）
-    for im in ws._images:         # 縦横比を保ってセル（行 3〜6 / 列 J・K）に納まる
+    for im in ws._images:         # 縦横比を保ってセル（行 3〜6 / 列 K・L）に納まる
         a0, a1 = im.anchor._from, im.anchor.to
         assert a0.col == a1.col and a0.row == a1.row and im.anchor.editAs == "twoCell"
-        assert a0.col in (9, 10) and 2 <= a0.row <= 5
-    body_anchor = next(im.anchor for im in ws._images if im.anchor._from.col == 9)
+        assert a0.col in (10, 11) and 2 <= a0.row <= 5
+    body_anchor = next(im.anchor for im in ws._images if im.anchor._from.col == 10)
     w = body_anchor.to.colOff - body_anchor._from.colOff
     h = body_anchor.to.rowOff - body_anchor._from.rowOff
     assert w / h == pytest.approx(50 / 120, rel=0.02)

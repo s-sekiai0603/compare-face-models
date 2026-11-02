@@ -27,7 +27,8 @@ from .similarity import similarity_matrix
 OUTPUT_MODES = {
     "similarity": "同一人物の画像同士の類似度レポート出力",
     "misidentify": "誤識別となる画像の枚数レポート出力",
-    "both": "両方",
+    "rank": "対象画像の類似度順位レポート出力",
+    "both": "すべて",
 }
 ROUND_DIGITS = 4  # 類似度を小数 4 桁に丸めて比べる（検索元セット検索の順位と同じ。同じ値は「高い」に数えない）
 
@@ -40,6 +41,16 @@ def runs_similarity_report(mode: str) -> bool:
 def runs_misidentify_report(mode: str) -> bool:
     """誤識別となる画像の枚数レポートを出すモードか。"""
     return mode in ("misidentify", "both")
+
+
+def runs_rank_report(mode: str) -> bool:
+    """対象画像の類似度順位レポートを出すモードか。"""
+    return mode in ("rank", "both")
+
+
+def needs_gallery(mode: str) -> bool:
+    """比較対象フォルダ（非対象者の特徴量）が要るモードか。"""
+    return runs_misidentify_report(mode) or runs_rank_report(mode)
 
 
 def report_filename(now: datetime) -> str:
@@ -102,6 +113,28 @@ def count_misidentified(target_emb: np.ndarray, nontarget_emb: np.ndarray) -> tu
     return counts, sim
 
 
+def rank_matrix(target_emb: np.ndarray, nontarget_emb: np.ndarray, nontarget_track_keys: list) -> np.ndarray:
+    """順位 ranks[i, j] = 1 + 「非対象者の追跡IDのうち、追跡ID内の最大類似度 sim(i, ·) が sim(i, j) より高いものの数」（対角は 0）。
+    同じ追跡IDの画像が複数高くても 1 件。対象者どうしは数えない。行 i 基準なので非対称。特徴量は L2 正規化済み。"""
+    t = np.asarray(target_emb, np.float64)
+    g = np.asarray(nontarget_emb, np.float64)
+    sim = t @ t.T
+    ranks = np.ones(sim.shape, np.int64)
+    if len(g):
+        ids: dict = {}
+        grp = np.array([ids.setdefault(k, len(ids)) for k in nontarget_track_keys])
+        order = np.argsort(grp, kind="stable")
+        starts = np.nonzero(np.r_[True, np.diff(grp[order]) != 0])[0]
+        ng = np.round(g[order] @ t.T, ROUND_DIGITS)            # (非対象者数, 対象者数)
+        tmax = np.maximum.reduceat(ng, starts, axis=0)         # (非対象者の追跡ID数, 対象者数)
+        for i in range(len(t)):
+            col = np.sort(tmax[:, i])
+            th = np.round(sim[i], ROUND_DIGITS)
+            ranks[i] = 1 + len(col) - np.searchsorted(col, th, side="right")
+    np.fill_diagonal(ranks, 0)
+    return ranks
+
+
 def _label(e: GalleryEntry) -> str:
     return f"{e.camera_id}/{e.video_file}/{e.track_id}/{e.face_path.name}"
 
@@ -143,16 +176,17 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
     誤識別の枚数レポート（misidentify / both）には比較対象フォルダ gallery_dir が必要。"""
     from .verify_face_size_excel import VerifyConditions, build_verify_face_size_report
 
-    want_sim, want_mis = runs_similarity_report(mode), runs_misidentify_report(mode)
-    if not (want_sim or want_mis):
+    want_sim, want_mis, want_rank = runs_similarity_report(mode), runs_misidentify_report(mode), runs_rank_report(mode)
+    want_gal = want_mis or want_rank
+    if not (want_sim or want_gal):
         raise ValueError(f"出力内容が不明です: {mode}")
-    if want_mis and not (gallery_dir and str(gallery_dir).strip()):
-        raise ValueError("誤識別となる画像の枚数レポートには比較対象フォルダの指定が必要です")
+    if want_gal and not (gallery_dir and str(gallery_dir).strip()):
+        raise ValueError("誤識別となる画像の枚数レポート・類似度順位レポートには比較対象フォルダの指定が必要です")
     log = PhaseLogger(echo=lambda m: (echo(m), progress(m)))
     generated = datetime.now()
     gate_filter = gate_filter or GateFilter()
     output_dir = Path(output_dir)
-    gallery_path = Path(gallery_dir) if want_mis else None
+    gallery_path = Path(gallery_dir) if want_gal else None
     with log.phase(f"初期化・モデルロード（特徴量: {model_name} / ランドマーク: {landmark_name}）"):
         extractor = get_extractor(model_name)
         aligner = get_aligner(landmark_name)
@@ -172,7 +206,7 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
     nontargets: list[GalleryEntry] = []
     nt_emb = None
     cache = None
-    if want_mis:
+    if want_gal:
         target_dirs = {Path(d).resolve() for d in track_dirs if str(d).strip()}
         with log.phase("比較対象スキャン（非対象者の特定）") as rec:
             if not gallery_path.is_dir():
@@ -200,22 +234,29 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
         if cache is not None:
             cache.save()
             rec.note += f" / 特徴量キャッシュ: 再利用 {cache.hits} 件, 新規計算 {cache.misses} 件"
-    sim = counts = None
+    sim = counts = ranks = None
     n = len(entries)
     if want_sim:
         with log.phase("類似度計算") as rec:
             sim = similarity_matrix(emb, emb)
             rec.note = f"{n} × {n} のうち左下半分 {n * (n - 1) // 2} 組"
     out = output_dir / report_filename(generated)
-    log_path = out.with_suffix(".txt")
+    # 誤認した画像の一覧テキストはサイズが大きくなりすぎるため出力しない（復活させるときは下のコメントを外す）
+    # log_path = out.with_suffix(".txt")
     if want_mis:
-        with log.phase("誤識別数の計算・誤認した画像の一覧出力") as rec:
+        with log.phase("誤識別数の計算") as rec:
             counts, sim_tt = count_misidentified(emb, nt_emb)
             output_dir.mkdir(parents=True, exist_ok=True)
-            n_pairs = write_misidentify_log(log_path, entries, nontargets, emb, nt_emb, counts, sim_tt)
-            rec.note = f"{n} × {n - 1} 組 / 誤識別あり {n_pairs} 組 / 一覧: {log_path.name}"
+            # n_pairs = write_misidentify_log(log_path, entries, nontargets, emb, nt_emb, counts, sim_tt)
+            # rec.note = f"{n} × {n - 1} 組 / 誤識別あり {n_pairs} 組 / 一覧: {log_path.name}"
+            rec.note = f"{n} × {n - 1} 組"
+    n_tracks = len({g.track_key for g in nontargets})
+    if want_rank:
+        with log.phase("類似度順位の計算") as rec:
+            ranks = rank_matrix(emb, nt_emb, [g.track_key for g in nontargets])  # 非対象者の特徴量は誤識別数と共用
+            rec.note = f"{n} × {n - 1} 組 / 非対象者の追跡ID {n_tracks} 件の中での順位"
     cond = VerifyConditions(model_name, landmark_name, gate_filter.describe(), generated,
-                            str(gallery_path) if want_mis else "", len(nontargets) if want_mis else None,
-                            log_path.name if want_mis else "")
-    build_verify_face_size_report(out, cond, entries, sim, log, counts, info_entries=sort_info_entries(entries))
+                            str(gallery_path) if want_gal else "", len(nontargets) if want_gal else None,
+                            n_nontarget_tracks=n_tracks if want_rank else None)
+    build_verify_face_size_report(out, cond, entries, sim, log, counts, info_entries=sort_info_entries(entries), ranks=ranks)
     return out, log

@@ -18,7 +18,7 @@ from ..core.common.settings import (
 )
 from ..core.features import visible_extractors
 from ..core.landmarks import ALIGNERS
-from ..core.report.verify_face_size import OUTPUT_MODES, runs_misidentify_report
+from ..core.report.verify_face_size import OUTPUT_MODES, needs_gallery
 from .report_worker import VerifyFaceSizeWorker
 from .widgets import DropLineEdit, GateFilterRow, WeightsGuard, add_model_box, add_path_row, checked_name, fixed_label
 
@@ -174,8 +174,8 @@ class VerifyFaceSizeScreen(QWidget):
             QMessageBox.warning(self, "顔サイズ別精度検証", "レポート出力先フォルダを指定してください。")
             return
         mode = self.selected_mode()
-        if runs_misidentify_report(mode) and not self.gallery_edit.text():
-            QMessageBox.warning(self, "顔サイズ別精度検証", "誤識別となる画像の枚数レポートには比較対象フォルダの指定が必要です。")
+        if needs_gallery(mode) and not self.gallery_edit.text():
+            QMessageBox.warning(self, "顔サイズ別精度検証", "誤識別となる画像の枚数レポート・類似度順位レポートには比較対象フォルダの指定が必要です。")
             return
         self._save_settings()
         self.worker = VerifyFaceSizeWorker(

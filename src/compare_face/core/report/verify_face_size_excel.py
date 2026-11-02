@@ -29,6 +29,7 @@ from .query_set_excel import BORDER, CENTER, HEAD_FILL, HEAD_FONT, NA
 
 SHEET_NAME = "比較結果類似度まとめ"
 MISIDENTIFY_SHEET_NAME = "比較結果誤識別数まとめ"
+RANK_SHEET_NAME = "比較結果順位まとめ"
 INFO_SHEET_NAME = "対象画像情報"
 FIRST_ROW = 12   # 縦側の最初の画像の行
 FIRST_COL = 9    # 横側の最初の画像の列（I）
@@ -49,10 +50,13 @@ MAX_COUNT_BIN = 12   # 451 件以上
 _COUNT_COLORS = ((0xFF, 0xEB, 0x84), (0xFD, 0xB0, 0x7A), (0xF8, 0x69, 0x6B), (0xC0, 0x00, 0x00))  # 黄 → 橙 → 赤 → 濃赤
 _COUNT_LEGEND = (0, 1, 11, 21, 51, 101, 10_000)  # 凡例に出す段階の代表件数
 
+# 順位の段階（上限, 表示名）。1 位は緑、2 位以降は段階が上がるほど 黄 → 橙 → 赤 → 濃赤。最後の段階は上限なし
+RANK_BINS = ((1, "1位"), (2, "2位"), (3, "3位"), (5, "4〜5位"), (10, "6〜10位"), (20, "11〜20位"), (50, "21〜50位"), (None, "51位以降"))
+
 # 5〜11 行目の行見出し（H 列）と、画像 1 枚の値の取り出し
 _ROW_LABELS = ("カメラID", "映像ファイル名", "追跡ID", "画像ファイル名", "顔の向き", "画像サイズ(幅:px)", "画像サイズ(高さ:px)")
-# 11 行目の縦側見出し（B〜H 列）と、画像 1 枚の値の取り出し
-_COL_HEADS = ("カメラ\nID", "追跡\nID", "映像\nファイル名", "画像\nファイル名", "顔の向き", "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)")
+# 11 行目の縦側見出し（B〜H 列）。並びは横側（_ROW_LABELS）と同じ
+_COL_HEADS = ("カメラ\nID", "映像\nファイル名", "追跡\nID", "画像\nファイル名", "顔の向き", "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)")
 
 
 @dataclass
@@ -64,6 +68,7 @@ class VerifyConditions:
     gallery_dir: str = ""            # 比較対象フォルダ（誤識別レポートのとき）
     n_nontarget: int | None = None   # 非対象者の画像数（誤識別レポートのとき）
     log_text_name: str = ""          # 誤認した画像の一覧（テキストファイル名。誤識別レポートのとき）
+    n_nontarget_tracks: int | None = None   # 非対象者の追跡ID数（順位レポートのとき）
 
 
 def sim_fill(sim: float) -> PatternFill:
@@ -111,6 +116,26 @@ def count_fill(n: int) -> PatternFill:
     return PatternFill("solid", fgColor="FF" + "".join(f"{v:02X}" for v in rgb))
 
 
+def rank_bin(rank: int) -> int:
+    """順位の段階（RANK_BINS の添字）。"""
+    for b, (upper, _) in enumerate(RANK_BINS):
+        if upper is None or rank <= upper:
+            return b
+    return len(RANK_BINS) - 1
+
+
+def rank_fill(rank: int) -> PatternFill:
+    """1 位は緑。2 位以降は段階が上がるほど 黄 → 橙 → 赤 → 濃赤。"""
+    b = rank_bin(rank)
+    if b == 0:
+        return PatternFill("solid", fgColor="FF63BE7B")
+    t = (b - 1) / (len(RANK_BINS) - 2) * (len(_COUNT_COLORS) - 1)
+    k = min(int(t), len(_COUNT_COLORS) - 2)
+    a, c = _COUNT_COLORS[k], _COUNT_COLORS[k + 1]
+    rgb = [round(x + (y - x) * (t - k)) for x, y in zip(a, c)]
+    return PatternFill("solid", fgColor="FF" + "".join(f"{v:02X}" for v in rgb))
+
+
 def _px(v) -> object:
     return NA if v is None else round(float(v), 1)
 
@@ -118,13 +143,6 @@ def _px(v) -> object:
 def _values(e: GalleryEntry) -> list:
     """横側（5〜11 行目）の画像 1 枚の値。並びは _ROW_LABELS（カメラID・映像ファイル名・追跡ID・画像ファイル名・顔の向き（空欄）・幅・高さ）。"""
     return [e.camera_id, e.video_file, e.track_id, e.face_path.name, None, _px(e.face_width), _px(e.face_height)]
-
-
-def _col_values(e: GalleryEntry) -> list:
-    """縦側（12 行目以降・B〜H 列）の画像 1 枚の値。並びは _COL_HEADS（カメラID・追跡ID・映像ファイル名・画像ファイル名・顔の向き（空欄）・幅・高さ）。
-    横側と並びが違う（サンプルのレイアウトどおり）ので _values とは別にしている。"""
-    v = _values(e)
-    return [v[0], v[2], v[1], v[3], v[4], v[5], v[6]]
 
 
 def _put(ws, r: int, c: int, v, fill: PatternFill | None = None, head: bool = False):
@@ -157,7 +175,7 @@ def _build_matrix_sheet(ws, entries: list[GalleryEntry], title: str, note: str, 
     for k, h in enumerate(_COL_HEADS):
         _put(ws, 11, 2 + k, h, head=True)
     for i, e in enumerate(entries):
-        for k, v in enumerate(_col_values(e)):
+        for k, v in enumerate(_values(e)):
             _put(ws, FIRST_ROW + i, 2 + k, v)
     for i in range(n):
         for j in range(n):
@@ -175,7 +193,7 @@ def _build_matrix_sheet(ws, entries: list[GalleryEntry], title: str, note: str, 
     ws.row_dimensions[11].height = 32.25
     for i in range(n):
         ws.row_dimensions[FIRST_ROW + i].height = 20.25
-    for c, w in zip("ABCDEFGH", (3, 9, 7, 18, 28, 11, 11, 20)):
+    for c, w in zip("ABCDEFGH", (3, 9, 18, 7, 28, 11, 11, 20)):
         ws.column_dimensions[c].width = w
     for j in range(n):
         ws.column_dimensions[get_column_letter(FIRST_COL + j)].width = 12
@@ -215,12 +233,26 @@ def _build_misidentify(ws, entries: list[GalleryEntry], counts: np.ndarray, n_no
                         legend, cell)
 
 
+def _build_rank(ws, entries: list[GalleryEntry], ranks: np.ndarray, n_tracks: int) -> None:
+    """順位シート: 縦 i × 横 j に「非対象者の追跡IDのうち i との類似度が j より高い追跡IDの数 + 1」（行基準なので左下・右上とも出す）。"""
+    legend = [(label, rank_fill(upper if upper is not None else 10_000)) for upper, label in RANK_BINS]
+
+    def cell(i: int, j: int):
+        r = int(ranks[i, j])
+        return r, rank_fill(r), "0"
+
+    _build_matrix_sheet(ws, entries, "比較結果：順位まとめ",
+                        f"縦の画像（行）を基準に、横の画像（列）の類似度が非対象者の追跡ID {n_tracks} 件の中で何位か（同じ追跡IDの複数画像は 1 件。"
+                        "対象者どうしは数えない）。色は順位の段階。",
+                        legend, cell)
+
+
 # ---- 対象画像情報（サンプル「対象画像情報【サンプル】」）----
-INFO_HEADS = ("キー情報", "カメラ\nID", "追跡\nID", "映像ファイル名", "画像ファイル名", "顔の向き", "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)",
-              "全身画像", "顔画像")
+INFO_HEADS = ("キー情報", "カメラ\nID", "映像ファイル名", "追跡\nID", "画像ファイル名", "顔の向き", "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)",
+              "顔の信頼度", "全身画像", "顔画像")
 INFO_FIRST_ROW = 3
 INFO_ROW_PT = 74.25
-INFO_WIDTHS = (50, 9, 9, 20.625, 28, 9, 11, 11, 16, 16)  # B〜K 列
+INFO_WIDTHS = (50, 9, 20.625, 9, 28, 9, 11, 11, 11, 16, 16)  # B〜L 列
 _EMU_PER_PX = 9525
 _PAD_PX = 3
 
@@ -269,7 +301,7 @@ class _FitImages:
 
 
 def _build_info_sheet(ws, entries: list[GalleryEntry], images: _FitImages) -> None:
-    """検証対象人物の顔画像情報の一覧。キー情報は関数式（カメラID|追跡ID|映像ファイル名|画像ファイル名）。
+    """検証対象人物の顔画像情報の一覧。キー情報は関数式（カメラID|映像ファイル名|追跡ID|画像ファイル名）。
     画像サイズは顔 bbox の幅・高さ（追跡IDごとの JSON から。他のシートと同じ取得元）。全身画像・顔画像はオートフィルタで隠れるよう貼る。"""
     ws.sheet_view.showGridLines = False
     for k, h in enumerate(INFO_HEADS):
@@ -278,13 +310,13 @@ def _build_info_sheet(ws, entries: list[GalleryEntry], images: _FitImages) -> No
     cell_h = int(INFO_ROW_PT * 96 / 72)
     for i, e in enumerate(entries):
         r = INFO_FIRST_ROW + i
-        cam, track, video, fname, direction, w, h = _col_values(e)
-        vals = [f'=C{r}&"|"&D{r}&"|"&E{r}&"|"&F{r}', cam, track, video, fname, direction, w, h, None, None]
+        cam, video, track, fname, direction, w, h = _values(e)
+        vals = [f'=C{r}&"|"&D{r}&"|"&E{r}&"|"&F{r}', cam, video, track, fname, direction, w, h, NA if e.face_conf is None else round(float(e.face_conf), 4), None, None]
         for k, v in enumerate(vals):
             _put(ws, r, 2 + k, v)
         ws.row_dimensions[r].height = INFO_ROW_PT
-        images.put(ws, e.body_path, 10, r, _col_px(INFO_WIDTHS[8]), cell_h)   # J 列 全身画像
-        images.put(ws, e.face_path, 11, r, _col_px(INFO_WIDTHS[9]), cell_h)   # K 列 顔画像
+        images.put(ws, e.body_path, 11, r, _col_px(INFO_WIDTHS[9]), cell_h)   # K 列 全身画像
+        images.put(ws, e.face_path, 12, r, _col_px(INFO_WIDTHS[10]), cell_h)  # L 列 顔画像
     ws.column_dimensions["A"].width = 3
     for k, w in enumerate(INFO_WIDTHS):
         ws.column_dimensions[get_column_letter(2 + k)].width = w
@@ -305,8 +337,10 @@ def _build_conditions(ws, cond: VerifyConditions, entries: list[GalleryEntry]) -
         ("追跡ID数", len({e.track_key for e in entries})),
     ]
     if cond.n_nontarget is not None:
-        rows += [("比較対象フォルダ", cond.gallery_dir), ("非対象者の画像数", cond.n_nontarget),
-                 ("誤認した画像の一覧（テキスト）", cond.log_text_name)]
+        rows += [("比較対象フォルダ", cond.gallery_dir), ("非対象者の画像数", cond.n_nontarget)]
+        # テキスト一覧を出力する場合のみ: rows.append(("誤認した画像の一覧（テキスト）", cond.log_text_name))
+    if cond.n_nontarget_tracks is not None:
+        rows.append(("非対象者の追跡ID数", cond.n_nontarget_tracks))
     for i, (k, v) in enumerate(rows, start=1):
         ws.cell(row=i, column=1, value=k).font = Font(bold=True)
         ws.cell(row=i, column=2, value=v).alignment = Alignment(wrap_text=True, vertical="top")
@@ -314,7 +348,7 @@ def _build_conditions(ws, cond: VerifyConditions, entries: list[GalleryEntry]) -
 
 def build_verify_face_size_report(path: Path, cond: VerifyConditions, entries: list[GalleryEntry], sim: np.ndarray | None,
                                   log: PhaseLogger, counts: np.ndarray | None = None,
-                                  info_entries: list[GalleryEntry] | None = None) -> None:
+                                  info_entries: list[GalleryEntry] | None = None, ranks: np.ndarray | None = None) -> None:
     """Excel を作成して保存する。先頭に「対象画像情報」（info_entries があれば。並びは呼び出し側で決める）、sim があれば類似度シート、
     counts があれば誤識別数シートを作る。ログシートは全フェーズ終了後に追記して再保存する。"""
     images = _FitImages()
@@ -328,6 +362,8 @@ def build_verify_face_size_report(path: Path, cond: VerifyConditions, entries: l
                 _build_summary(wb.create_sheet(SHEET_NAME), entries, sim)
             if counts is not None:
                 _build_misidentify(wb.create_sheet(MISIDENTIFY_SHEET_NAME), entries, counts, cond.n_nontarget or 0)
+            if ranks is not None:
+                _build_rank(wb.create_sheet(RANK_SHEET_NAME), entries, ranks, cond.n_nontarget_tracks or 0)
             _build_conditions(wb.create_sheet("条件"), cond, entries)
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             wb.save(path)

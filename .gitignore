@@ -8,9 +8,11 @@ models/*
 dataset/*
 !dataset/.gitkeep
 settings.json
+verify_face_size_screen_setting.json
 # 検証エビデンス（Excel・抽出した顔画像。サイズが大きいため Git 管理外）
 reid_evidence/
 face_evidence/
 # 改修前の外見識別(reid)版のソース（参照用に手元に残すだけ。Git 管理外）
 reid/
 .pytest_cache/
+debug/
