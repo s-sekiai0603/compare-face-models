@@ -5,6 +5,7 @@ from PySide6.QtCore import QThread, Signal
 from ..core.features import WeightsUnavailable, get_extractor
 from ..core.landmarks import get_aligner
 from ..core.pose import get_pose_estimator
+from ..core.report.face_size_map import run_face_size_map
 from ..core.report.pipeline import run_report
 from ..core.report.query_set import run_query_set_search
 from ..core.report.verify_face_size import run_verify_face_size
@@ -84,5 +85,23 @@ class VerifyFaceSizeWorker(QThread):
         try:
             out, _ = run_verify_face_size(progress=self.progress.emit, **self.kwargs)
             self.finished_ok.emit(str(out))
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class FaceSizeMapWorker(QThread):
+    """指定顔サイズマッピング（face_size_map.run_face_size_map）を別スレッドで実行する。"""
+    progress = Signal(str)
+    finished_ok = Signal(list, list)  # 出力ファイル（文字列）, スキップ・注意の説明
+    failed = Signal(str)
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+
+    def run(self) -> None:
+        try:
+            outputs, notes = run_face_size_map(progress=self.progress.emit, **self.kwargs)
+            self.finished_ok.emit([str(p) for p in outputs], notes)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")

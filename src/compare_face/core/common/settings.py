@@ -91,3 +91,29 @@ def load_verify_face_size_settings(path: Path = VERIFY_FACE_SIZE_SETTINGS_PATH) 
 
 def save_verify_face_size_settings(settings: dict, path: Path = VERIFY_FACE_SIZE_SETTINGS_PATH) -> None:
     save_settings(settings, path)
+
+
+# ---- 指定顔サイズマッピング画面の設定（画面専用のファイル。入力内容を保存して次回起動時に復元する） ----
+FACE_SIZE_MAP_SETTINGS_PATH = PROJECT_ROOT / "face_size_map_screen_setting.json"
+
+FACE_SIZE_MAP_DEFAULTS = {
+    "face_height": 80,                                               # 顔 bbox の高さ(px)。この値以上の顔の足元をプロットする
+    "gallery_dir": "",                                               # 比較対象フォルダ
+    "camera_dir": str(PROJECT_ROOT / "debug" / "cam_pics" / "org"),  # カメラ画像フォルダ（ファイル名 = カメラID）
+    "output_dir": str(PROJECT_ROOT / "debug" / "cam_pics" / "out"),  # 結果出力先フォルダ
+}
+
+
+def load_face_size_map_settings(path: Path = FACE_SIZE_MAP_SETTINGS_PATH) -> dict:
+    data = dict(FACE_SIZE_MAP_DEFAULTS)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data.update({k: loaded[k] for k in data if k in loaded})
+    except (OSError, ValueError):
+        pass
+    return data
+
+
+def save_face_size_map_settings(settings: dict, path: Path = FACE_SIZE_MAP_SETTINGS_PATH) -> None:
+    save_settings(settings, path)
