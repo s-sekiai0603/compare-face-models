@@ -27,6 +27,7 @@ DEFAULTS = {
     "report_face_gate": True,                 # 骨格ルール（鼻+片目 / 下向きでない）を適用
     "report_min_eye_ratio": 0.05,             # 両目間隔比のしきい値
     "report_min_crop_side": 60,               # 切り出し短辺(px)のしきい値
+    "report_max_shoulder_reverse": 0.0,       # 肩の左右逆転量のしきい値（骨格ルール有効時のみ。0 で判定しない）
     "report_model": "AdaFace",
     "report_landmark": "なし",
     "report_pose": "なし",
@@ -73,6 +74,8 @@ VERIFY_FACE_SIZE_DEFAULTS = {
     "face_gate": True,
     "min_eye_ratio": 0.05,
     "min_crop_side": 60,
+    "max_shoulder_reverse": 0.0,
+    "grayscale": False,               # 特徴量抽出前に顔画像をグレースケール化する
 }
 
 

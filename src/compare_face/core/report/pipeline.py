@@ -58,13 +58,21 @@ def _read(entry: GalleryEntry) -> np.ndarray:
     return img
 
 
+def to_gray_bgr(bgr: np.ndarray) -> np.ndarray:
+    """グレースケール化して 3 チャネル（B=G=R）に戻す。モデルの入力形状は変えずに色味の情報だけ消す。"""
+    return cv2.cvtColor(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+
+
 def embed_entries(extractor, aligner, entries: list[GalleryEntry], progress=None,
-                  cache: EmbeddingCache | None = None, clahe: bool = False) -> tuple[np.ndarray, EmbedStats]:
+                  cache: EmbeddingCache | None = None, clahe: bool = False,
+                  grayscale: bool = False) -> tuple[np.ndarray, EmbedStats]:
     """CHUNK_SIZE 枚ずつ読み込み、ランドマークでアラインしてから特徴量化する（メモリ抑制）。
     アラインに失敗した画像は単純リサイズで代替する。cache があれば、保存済みの画像は計算せずに再利用し、
     新しく計算した分をキャッシュへ入れる（save は呼び出し側）。結果はキャッシュの有無で変わらない。
     clahe=True: アライン後の顔画像に CLAHE（LAB の L チャネル, clip 2.0。premises-security の AdaFace 前処理と同じ）を
-    掛けてから特徴量化する。cache は variant="clahe" のものを渡すこと（特徴量の値が変わる）。"""
+    掛けてから特徴量化する。cache は variant="clahe" のものを渡すこと（特徴量の値が変わる）。
+    grayscale=True: アライン後の顔画像（clahe もあればその後）をグレースケール化（3 チャネルに戻す）してから特徴量化し、
+    ライティングによる色味の違いを抑える。cache は variant に "gray" を含むものを渡すこと（特徴量の値が変わる）。"""
     emb = np.zeros((len(entries), extractor.embed_dim), np.float32)
     stats = EmbedStats()
     size = extractor.input_size
@@ -92,7 +100,8 @@ def embed_entries(extractor, aligner, entries: list[GalleryEntry], progress=None
                 face = res.image
                 landmarks.append(res.landmarks)
                 failed_flags.append(False)
-            faces.append(apply_clahe(face) if clahe else face)
+            face = apply_clahe(face) if clahe else face
+            faces.append(to_gray_bgr(face) if grayscale else face)
         if extractor.needs_landmarks:
             stats.landmark_missing += sum(1 for lm in landmarks if lm is None)
             chunk = extractor.embed_batch(faces, landmarks=landmarks)

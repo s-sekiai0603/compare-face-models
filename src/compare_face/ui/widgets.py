@@ -74,6 +74,17 @@ class GateFilterRow(QWidget):
         self.cb_face_gate = QCheckBox("骨格ルール（鼻+片目が見える / 下向きでない）")
         self.cb_face_gate.setChecked(bool(settings["report_face_gate"]))
         row.addWidget(self.cb_face_gate)
+        self.shoulder_spin = QDoubleSpinBox()
+        self.shoulder_spin.setRange(0.0, 1.0)
+        self.shoulder_spin.setDecimals(2)
+        self.shoulder_spin.setSingleStep(0.01)
+        self.shoulder_spin.setSpecialValueText("判定なし")
+        self.shoulder_spin.setPrefix("肩の逆転 < ")
+        self.shoulder_spin.setToolTip("肩の左右が逆（後ろ向き・強い横向き）の度合い = 肩のx差÷人物の高さ。この値以上の画像を使わない（目安 0.10）。骨格ルールが有効なときだけ適用")
+        self.shoulder_spin.setValue(float(settings.get("report_max_shoulder_reverse", 0.0)))
+        self.shoulder_spin.setEnabled(self.cb_face_gate.isChecked())
+        self.cb_face_gate.toggled.connect(self.shoulder_spin.setEnabled)
+        row.addWidget(self.shoulder_spin)
         self.eye_ratio_spin = QDoubleSpinBox()
         self.eye_ratio_spin.setRange(0.0, 1.0)
         self.eye_ratio_spin.setDecimals(2)
@@ -93,11 +104,13 @@ class GateFilterRow(QWidget):
         row.addStretch()
 
     def value(self) -> GateFilter:
-        return GateFilter(self.cb_face_gate.isChecked(), self.eye_ratio_spin.value(), float(self.crop_side_spin.value()))
+        return GateFilter(self.cb_face_gate.isChecked(), self.eye_ratio_spin.value(), float(self.crop_side_spin.value()),
+                          self.shoulder_spin.value())
 
     def save_to(self, settings: dict) -> None:
         settings.update(report_face_gate=self.cb_face_gate.isChecked(), report_min_eye_ratio=self.eye_ratio_spin.value(),
-                        report_min_crop_side=self.crop_side_spin.value())
+                        report_min_crop_side=self.crop_side_spin.value(),
+                        report_max_shoulder_reverse=self.shoulder_spin.value())
 
 
 def add_model_box(owner: QWidget, parent: QVBoxLayout, title: str, registry: dict, saved: str,
