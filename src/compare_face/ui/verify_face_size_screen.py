@@ -104,6 +104,11 @@ class VerifyFaceSizeScreen(QWidget):
         self.cb_grayscale.setToolTip("アライン後の顔画像に明るさ補正（CLAHE。LAB の L チャネル）を掛け、グレースケール化（3 チャネルに戻す）してから特徴量化する。比較対象・検証対象の両方に適用し、特徴量キャッシュは別ファイルになる")
         root.addWidget(self.cb_grayscale)
 
+        self.cb_align168 = QCheckBox("168×168 アライメント（168×168 でアラインしてから 112×112 に縮小して特徴量化する）")
+        self.cb_align168.setChecked(bool(self.settings["align168"]))
+        self.cb_align168.setToolTip("通常は 112×112 でアラインする。ONにすると 168×168 でアラインし、特徴量モデルへ渡す直前に 112×112 へ縮小（INTER_AREA）する。比較対象・検証対象の両方に適用し、特徴量キャッシュは別ファイルになる")
+        root.addWidget(self.cb_align168)
+
         # モデル選択（レジストリへの登録でラジオが増える）
         self.model_group, self.model_buttons = add_model_box(
             self, root, "顔特徴量抽出モデル", visible_extractors(), self.settings["model"], self._on_model_changed)
@@ -168,7 +173,8 @@ class VerifyFaceSizeScreen(QWidget):
             output_dir=self.out_edit.text(),
             model=self.selected_model(), landmark=self.selected_landmark(), face_gate=gate["report_face_gate"],
             min_eye_ratio=gate["report_min_eye_ratio"], min_crop_side=gate["report_min_crop_side"],
-            max_shoulder_reverse=gate["report_max_shoulder_reverse"], grayscale=self.cb_grayscale.isChecked())
+            max_shoulder_reverse=gate["report_max_shoulder_reverse"], grayscale=self.cb_grayscale.isChecked(),
+            align168=self.cb_align168.isChecked())
         save_verify_face_size_settings(self.settings)
 
     # ---- レポート出力 ----
@@ -188,7 +194,7 @@ class VerifyFaceSizeScreen(QWidget):
         self.worker = VerifyFaceSizeWorker(
             track_dirs=[Path(d) for d in dirs], output_dir=Path(self.out_edit.text()),
             model_name=self.selected_model(), landmark_name=self.selected_landmark(), gate_filter=self.gate_row.value(),
-            grayscale=self.cb_grayscale.isChecked(), mode=mode, gallery_dir=Path(self.gallery_edit.text()) if self.gallery_edit.text() else None)
+            grayscale=self.cb_grayscale.isChecked(), align168=self.cb_align168.isChecked(), mode=mode, gallery_dir=Path(self.gallery_edit.text()) if self.gallery_edit.text() else None)
         self.worker.progress.connect(self.status.setText)
         self.worker.finished_ok.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)

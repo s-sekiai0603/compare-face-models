@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QAbstractItemView, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -48,6 +48,13 @@ class ExtractScreen(QWidget):
         row.addWidget(btn_none)
         row.addWidget(btn_reload)
         layout.addLayout(row)
+
+        self.cb_estimate_foot = QCheckBox("足元座標取得不可の場合は動きから座標推測")
+        self.cb_estimate_foot.setChecked(bool(self.settings["estimate_foot"]))
+        self.cb_estimate_foot.setToolTip(
+            "足首が信頼度不足で取れない場合、同じ追跡IDのそれまでの足首の遷移から足元（foot_xy）を推測して出力する（X は顔 bbox の左右の中央、Y は遷移からの推測）。"
+            "それまでの足首が無い場合は、それ以降の遷移から後追いで推測する（foot_source は estimated_past / estimated_future）")
+        layout.addWidget(self.cb_estimate_foot)
 
         self.table = QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
@@ -103,7 +110,8 @@ class ExtractScreen(QWidget):
 
     def _save(self) -> None:
         self.settings.update(video_root=self.root_edit.text(), output_root=self.out_edit.text(),
-                             interval_sec=round(self.interval.value(), 1))
+                             interval_sec=round(self.interval.value(), 1),
+                             estimate_foot=self.cb_estimate_foot.isChecked())
         save_settings(self.settings)
 
     def _set_all_checked(self, checked: bool) -> None:
@@ -135,7 +143,7 @@ class ExtractScreen(QWidget):
             return
         self._save()  # 抽出実行時の頻度を次回の既定値にする
         self.worker = ExtractWorker([self.videos[r] for r in rows], Path(self.out_edit.text()),
-                                    self.interval.value())
+                                    self.interval.value(), self.cb_estimate_foot.isChecked())
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._on_done)

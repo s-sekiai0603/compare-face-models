@@ -65,17 +65,21 @@ def to_gray_bgr(bgr: np.ndarray) -> np.ndarray:
 
 def embed_entries(extractor, aligner, entries: list[GalleryEntry], progress=None,
                   cache: EmbeddingCache | None = None, clahe: bool = False,
-                  grayscale: bool = False) -> tuple[np.ndarray, EmbedStats]:
+                  grayscale: bool = False, align_size: int | None = None) -> tuple[np.ndarray, EmbedStats]:
     """CHUNK_SIZE 枚ずつ読み込み、ランドマークでアラインしてから特徴量化する（メモリ抑制）。
     アラインに失敗した画像は単純リサイズで代替する。cache があれば、保存済みの画像は計算せずに再利用し、
     新しく計算した分をキャッシュへ入れる（save は呼び出し側）。結果はキャッシュの有無で変わらない。
     clahe=True: アライン後の顔画像に CLAHE（LAB の L チャネル, clip 2.0。premises-security の AdaFace 前処理と同じ）を
     掛けてから特徴量化する。cache は variant="clahe" のものを渡すこと（特徴量の値が変わる）。
     grayscale=True: アライン後の顔画像（clahe もあればその後）をグレースケール化（3 チャネルに戻す）してから特徴量化し、
-    ライティングによる色味の違いを抑える。cache は variant に "gray" を含むものを渡すこと（特徴量の値が変わる）。"""
+    ライティングによる色味の違いを抑える。cache は variant に "gray" を含むものを渡すこと（特徴量の値が変わる）。
+    align_size: アラインを extractor.input_size（112）ではなくこのサイズで行い、CLAHE・グレースケール化の後に input_size へ
+    縮小（INTER_AREA）して特徴量化する（ランドマーク座標も同じ比率で縮小）。None はアラインを input_size で行う（従来どおり）。
+    cache は variant に "align<サイズ>" を含むものを渡すこと（特徴量の値が変わる）。"""
     emb = np.zeros((len(entries), extractor.embed_dim), np.float32)
     stats = EmbedStats()
     size = extractor.input_size
+    asize = align_size or size
     todo = []  # 計算が必要な (entries の添字)
     for i, e in enumerate(entries):
         hit = cache.get(e.face_path) if cache is not None else None
@@ -90,10 +94,10 @@ def embed_entries(extractor, aligner, entries: list[GalleryEntry], progress=None
         faces, landmarks, failed_flags = [], [], []
         for i in idx:
             img = _read(entries[i])
-            res = aligner.align_with_landmarks(img, size)
+            res = aligner.align_with_landmarks(img, asize)
             if res is None:
                 stats.align_failed += 1
-                face = cv2.resize(img, (size, size), interpolation=cv2.INTER_CUBIC)
+                face = cv2.resize(img, (asize, asize), interpolation=cv2.INTER_CUBIC)
                 landmarks.append(None)
                 failed_flags.append(True)
             else:
@@ -101,7 +105,12 @@ def embed_entries(extractor, aligner, entries: list[GalleryEntry], progress=None
                 landmarks.append(res.landmarks)
                 failed_flags.append(False)
             face = apply_clahe(face) if clahe else face
-            faces.append(to_gray_bgr(face) if grayscale else face)
+            face = to_gray_bgr(face) if grayscale else face
+            if asize != size:
+                face = cv2.resize(face, (size, size), interpolation=cv2.INTER_AREA)
+                if landmarks[-1] is not None:
+                    landmarks[-1] = np.asarray(landmarks[-1], np.float32) * (size / asize)
+            faces.append(face)
         if extractor.needs_landmarks:
             stats.landmark_missing += sum(1 for lm in landmarks if lm is None)
             chunk = extractor.embed_batch(faces, landmarks=landmarks)
