@@ -1,0 +1,222 @@
+"""カメラ画像の射影変換設定（画像座標 → 地面の現実座標[m]）とカメラ設置座標の算出。
+
+画像上の 4 点（現実では長方形になる点。クリック順に一周）と長方形の 2 辺の長さから、
+  - 画像 → 地面（m）の射影変換 H
+  - カメラ設置座標 = カメラ直下の地面点が画像に写る位置（nadir。画像の外になり得る）
+を求める。nadir は長方形の 2 組の対辺の消失点から求める（主点 = 画像中心・正方画素と仮定して焦点距離を推定）。
+距離は「カメラ直下の地面点から対象点までの地面上の距離（m）」。GUI に依存しない。"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+MIN_W = 1e-3  # 消失点の同次座標 w を 4 点の広がり² で割った値がこれ未満なら対辺が平行（消失点が無限遠）とみなす
+
+
+class ProjectionError(ValueError):
+    """4 点・辺長からカメラ位置を算出できない（点の並び・退化した配置）。"""
+
+
+@dataclass(frozen=True)
+class CameraProjection:
+    homography: np.ndarray          # 画像 → 地面(m) 3x3
+    camera_xy: tuple[float, float]  # カメラ設置座標（画像座標系、画像外になり得る）
+    focal_px: float                 # 推定焦点距離(px)
+    height_m: float                 # 推定カメラ高さ(m)
+    vanishing_points: tuple = ()    # 長方形の 2 組の対辺の消失点 ((x, y), (x, y))。結ぶ直線が地平線
+
+    def ground_xy(self, xy: tuple[float, float]) -> tuple[float, float]:
+        p = self.homography @ np.array([xy[0], xy[1], 1.0])
+        return float(p[0] / p[2]), float(p[1] / p[2])
+
+    def distance_m(self, xy: tuple[float, float]) -> float:
+        """カメラ設置地点（直下）から画像座標 xy までの地面上の距離(m)。"""
+        gx, gy = self.ground_xy(xy)
+        cx, cy = self.ground_xy(self.camera_xy)
+        return float(np.hypot(gx - cx, gy - cy))
+
+    def slant_distance_m(self, xy: tuple[float, float]) -> float:
+        """カメラ本体（地面から推定高さの位置）から画像座標 xy の地面点までの直線距離(m)。"""
+        return float(np.hypot(self.distance_m(xy), self.height_m))
+
+
+def resolve_sides(long_m: float, short_m: float, first_side: str) -> tuple[float, float]:
+    """辺 p0→p1 の長さ a と辺 p1→p2 の長さ b を返す。first_side は 'long' か 'short'（p0→p1 の辺がどちらか）。"""
+    return (long_m, short_m) if first_side == "long" else (short_m, long_m)
+
+
+def _intersect(a1, a2, b1, b2) -> np.ndarray:
+    """直線 a1-a2 と b1-b2 の交点（同次座標）。"""
+    la = np.cross([a1[0], a1[1], 1.0], [a2[0], a2[1], 1.0])
+    lb = np.cross([b1[0], b1[1], 1.0], [b2[0], b2[1], 1.0])
+    return np.cross(la, lb)
+
+
+def compute_projection(points, side_a: float, side_b: float, image_size: tuple[int, int],
+                       focal_px: float | None = None) -> CameraProjection:
+    """points: 画像座標 4 点（長方形を一周する順）。side_a = p0→p1 の長さ(m)、side_b = p1→p2 の長さ(m)。
+    image_size: (幅, 高さ)。主点を画像中心とみなす。focal_px を与えると焦点距離を推定せずその値を使う（実測距離による補正用）。"""
+    pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
+    if side_a <= 0 or side_b <= 0:
+        raise ProjectionError("辺の長さは 0 より大きい値を指定してください。")
+    cross = []
+    for i in range(4):
+        e1, e2 = pts[(i + 1) % 4] - pts[i], pts[(i + 2) % 4] - pts[(i + 1) % 4]
+        cross.append(e1[0] * e2[1] - e1[1] * e2[0])
+    if not (all(c > 0 for c in cross) or all(c < 0 for c in cross)):
+        raise ProjectionError("4 点が凸四角形になっていません。長方形を一周する順にクリックしてください。")
+
+    world = np.array([[0, 0], [side_a, 0], [side_a, side_b], [0, side_b]], dtype=np.float32)
+    h = cv2.getPerspectiveTransform(pts.astype(np.float32), world).astype(np.float64)
+
+    # 同次座標のスケールを揃えてから無限遠判定する（直線の係数は座標の大きさに比例するため）
+    v1 = _intersect(pts[0], pts[1], pts[3], pts[2])  # 辺 p0p1 と p3p2（長さ a の組）の消失点
+    v2 = _intersect(pts[1], pts[2], pts[0], pts[3])  # 辺 p1p2 と p0p3（長さ b の組）の消失点
+    span = max(float(np.ptp(pts[:, 0])), float(np.ptp(pts[:, 1])), 1.0)
+    if abs(v1[2]) < MIN_W * span * span or abs(v2[2]) < MIN_W * span * span:
+        raise ProjectionError("対辺がほぼ平行に写っており、カメラ位置を算出できません。台形が強く出る 4 点を選んでください。")
+    c = np.array([image_size[0] / 2.0, image_size[1] / 2.0])
+    q1, q2 = v1[:2] / v1[2], v2[:2] / v2[2]
+    if focal_px is None:
+        f2 = -float((q1 - c) @ (q2 - c))
+        if f2 <= 0:
+            raise ProjectionError("焦点距離を推定できません（4 点の取り方を変えてください）。")
+        f = float(np.sqrt(f2))
+    else:
+        f = float(focal_px)
+    k = np.array([[f, 0, c[0]], [0, f, c[1]], [0, 0, 1.0]])
+    k_inv = np.linalg.inv(k)
+
+    d1 = k_inv @ np.array([q1[0], q1[1], 1.0])
+    d2 = k_inv @ np.array([q2[0], q2[1], 1.0])
+    n = np.cross(d1 / np.linalg.norm(d1), d2 / np.linalg.norm(d2))  # 地面の法線（カメラ座標）
+    n /= np.linalg.norm(n)
+    rays = [k_inv @ np.array([x, y, 1.0]) for x, y in pts]
+    if n @ np.mean(rays, axis=0) < 0:
+        n = -n  # カメラから地面へ向かう向きにそろえる
+    nadir = k @ n
+    if abs(nadir[2]) < 1e-6:
+        raise ProjectionError("カメラが水平に近く、設置座標が無限遠になります。")
+    camera_xy = (float(nadir[0] / nadir[2]), float(nadir[1] / nadir[2]))
+
+    # カメラ高さ: 地面までの距離 1 としたときの 3D 辺長と実際の辺長(m)の比
+    p3d = [r / (n @ r) for r in rays]
+    ratios = [side_a / np.linalg.norm(p3d[1] - p3d[0]), side_b / np.linalg.norm(p3d[2] - p3d[1]),
+              side_a / np.linalg.norm(p3d[2] - p3d[3]), side_b / np.linalg.norm(p3d[3] - p3d[0])]
+    return CameraProjection(h, camera_xy, f, float(np.mean(ratios)),
+                            ((float(q1[0]), float(q1[1])), (float(q2[0]), float(q2[1]))))
+
+
+def clip_line_to_rect(p1, p2, width: float, height: float):
+    """2 点 p1, p2 を通る直線を、画像の矩形 [0,width]x[0,height] で切り取った線分 ((x, y), (x, y))。交わらなければ None。"""
+    x1, y1 = p1
+    dx, dy = p2[0] - x1, p2[1] - y1
+    if dx == 0 and dy == 0:
+        return None
+    t0, t1 = -np.inf, np.inf
+    for p, q in ((-dx, x1), (dx, width - x1), (-dy, y1), (dy, height - y1)):  # Liang-Barsky（直線は無限に延びる）
+        if p == 0:
+            if q < 0:
+                return None
+        else:
+            t = q / p
+            if p < 0:
+                t0 = max(t0, t)
+            else:
+                t1 = min(t1, t)
+    if t0 > t1:
+        return None
+    return (x1 + t0 * dx, y1 + t0 * dy), (x1 + t1 * dx, y1 + t1 * dy)
+
+
+def calibrate_focal(points, side_a: float, side_b: float, image_size: tuple[int, int],
+                    ref_xy: tuple[float, float], measured_m: float) -> CameraProjection:
+    """カメラ直下の地面点から ref_xy までの実測距離 measured_m(m) に合うよう焦点距離を調整して算出し直す。
+    H は焦点距離に依らないので、変わるのはカメラ設置座標（と推定高さ）だけ。推定値に最も近い解を採用する。"""
+    if measured_m <= 0:
+        raise ProjectionError("実測距離は 0 より大きい値を指定してください。")
+    base = compute_projection(points, side_a, side_b, image_size)
+
+    def gap(f: float) -> float:
+        try:
+            return compute_projection(points, side_a, side_b, image_size, focal_px=f).distance_m(ref_xy) - measured_m
+        except ProjectionError:
+            return float("nan")
+
+    fs = base.focal_px * np.geomspace(0.1, 10.0, 400)
+    gs = [gap(float(f)) for f in fs]
+    roots = []
+    for i in range(len(fs) - 1):
+        g0, g1 = gs[i], gs[i + 1]
+        if np.isnan(g0) or np.isnan(g1) or g0 * g1 > 0:
+            continue
+        lo, hi = float(fs[i]), float(fs[i + 1])
+        for _ in range(60):  # 二分法
+            mid = (lo + hi) / 2
+            gm = gap(mid)
+            if np.isnan(gm):
+                break
+            if gap(lo) * gm <= 0:
+                hi = mid
+            else:
+                lo = mid
+        roots.append((lo + hi) / 2)
+    if not roots:
+        raise ProjectionError("実測距離に合う焦点距離が見つかりません。補正点・実測距離・4 点を見直してください。")
+    f = min(roots, key=lambda r: abs(np.log(r / base.focal_px)))
+    return compute_projection(points, side_a, side_b, image_size, focal_px=f)
+
+
+# ---- 設定ファイル（<画像名>.json） ----
+def save_config(path: Path, image_name: str, points, long_m: float, short_m: float, first_side: str,
+                camera_xy: tuple[float, float], focal_px: float | None = None,
+                ref_xy: tuple[float, float] | None = None, measured_m: float | None = None,
+                distortion: dict | None = None) -> None:
+    """focal_px / ref_xy / measured_m は実測距離で補正したときだけ記録する。
+    distortion = {"lambda", "scale", "lines"} はレンズ歪みを補正したときだけ記録する。補正したときは points / camera_xy / ref_xy は
+    「補正後の画像」の座標（元画像の点は distortion.py の変換で補正後の座標に直してから使う）。lines は元画像の座標。"""
+    data = {
+        "image": image_name,
+        "points": [[float(x), float(y)] for x, y in points],
+        "long_side_m": float(long_m),
+        "short_side_m": float(short_m),
+        "first_side": first_side,  # points[0]→points[1] の辺が long / short のどちらか
+        "camera_xy": [float(camera_xy[0]), float(camera_xy[1])],
+    }
+    if distortion is not None:
+        data["distortion"] = {
+            "lambda": float(distortion["lambda"]), "scale": float(distortion["scale"]),
+            "lines": [[[float(x), float(y)] for x, y in line] for line in distortion["lines"]],
+        }
+    if focal_px is not None:
+        data["calibration"] = {"focal_px": float(focal_px), "ref_xy": [float(ref_xy[0]), float(ref_xy[1])],
+                               "measured_m": float(measured_m)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_config(path: Path) -> dict | None:
+    """読めない・形式が違うときは None。"""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        pts = [(float(x), float(y)) for x, y in d["points"]]
+        if len(pts) != 4 or d["first_side"] not in ("long", "short"):
+            return None
+        cal = d.get("calibration")
+        calibration = None
+        if cal is not None:
+            calibration = {"focal_px": float(cal["focal_px"]), "ref_xy": tuple(float(v) for v in cal["ref_xy"]),
+                           "measured_m": float(cal["measured_m"])}
+        dist = d.get("distortion")
+        distortion = None
+        if dist is not None:
+            distortion = {"lambda": float(dist["lambda"]), "scale": float(dist["scale"]),
+                          "lines": [[(float(x), float(y)) for x, y in line] for line in dist["lines"]]}
+        return {"calibration": calibration, "distortion": distortion, "points": pts, "long_side_m": float(d["long_side_m"]), "short_side_m": float(d["short_side_m"]),
+                "first_side": d["first_side"], "camera_xy": tuple(float(v) for v in d["camera_xy"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None

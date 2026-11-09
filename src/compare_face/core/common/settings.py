@@ -12,6 +12,7 @@ DEFAULTS = {
     "video_root": "",
     "output_root": "",
     "interval_sec": DEFAULT_INTERVAL_SEC,
+    "estimate_foot": False,          # 抽出: 足首が取れない場合は足元を動きから推測する
     "report_mode": "顔画像指定",
     "report_query_path": "",
     "report_track_dir": "",
@@ -27,6 +28,7 @@ DEFAULTS = {
     "report_face_gate": True,                 # 骨格ルール（鼻+片目 / 下向きでない）を適用
     "report_min_eye_ratio": 0.05,             # 両目間隔比のしきい値
     "report_min_crop_side": 60,               # 切り出し短辺(px)のしきい値
+    "report_max_shoulder_reverse": 0.0,       # 肩の左右逆転量のしきい値（骨格ルール有効時のみ。0 で判定しない）
     "report_model": "AdaFace",
     "report_landmark": "なし",
     "report_pose": "なし",
@@ -73,6 +75,9 @@ VERIFY_FACE_SIZE_DEFAULTS = {
     "face_gate": True,
     "min_eye_ratio": 0.05,
     "min_crop_side": 60,
+    "max_shoulder_reverse": 0.0,
+    "grayscale": False,               # 特徴量抽出前に顔画像をグレースケール化する
+    "align168": False,                # 168×168 でアラインしてから 112×112 に縮小して特徴量化する
 }
 
 
@@ -116,4 +121,34 @@ def load_face_size_map_settings(path: Path = FACE_SIZE_MAP_SETTINGS_PATH) -> dic
 
 
 def save_face_size_map_settings(settings: dict, path: Path = FACE_SIZE_MAP_SETTINGS_PATH) -> None:
+    save_settings(settings, path)
+
+
+# ---- 射影変換設定抽出画面の設定（画面専用のファイル。最後に選んだ画像・出力先を保存して次回起動時に復元する） ----
+CAMERA_PROJECTION_SETTINGS_PATH = PROJECT_ROOT / "camera_projection_screen_setting.json"
+
+CAMERA_PROJECTION_DEFAULTS = {
+    "image_path": "",                                                       # カメラ画像ファイル（ファイル名 = カメラID）
+    "output_dir": str(PROJECT_ROOT / "debug" / "cam_pics" / "settings"),    # 設定ファイル出力先フォルダ
+    "show_guides": False,                                                   # 消失点・地平線を表示
+    "antialias": False,                                                     # アンチエイリアス
+    "show_points": True,                                                    # 長方形 4 点の表示
+}
+CAMERA_PROJECTION_IMAGE_DIR = PROJECT_ROOT / "debug" / "cam_pics" / "org"   # 画像選択時の既定フォルダ
+
+
+def load_camera_projection_settings(path: Path = CAMERA_PROJECTION_SETTINGS_PATH) -> dict:
+    data = dict(CAMERA_PROJECTION_DEFAULTS)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data.update({k: loaded[k] for k in data if k in loaded})
+    except (OSError, ValueError):
+        pass
+    for key in ("show_guides", "antialias", "show_points"):
+        data[key] = data[key] is True
+    return data
+
+
+def save_camera_projection_settings(settings: dict, path: Path = CAMERA_PROJECTION_SETTINGS_PATH) -> None:
     save_settings(settings, path)

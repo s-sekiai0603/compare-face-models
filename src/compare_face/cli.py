@@ -23,6 +23,8 @@ def _add_gate_args(parser: argparse.ArgumentParser) -> None:
                         help=f"顔の採用基準: 両目間隔÷顔幅がこの値未満の画像（横顔）を使わない（既定 {MIN_EYE_RATIO:g} = 抽出時と同じ。0 で判定しない）")
     parser.add_argument("--min-crop-side", type=float, default=MIN_CROP_SIDE,
                         help=f"顔の採用基準: 切り出し短辺(px)がこの値未満の画像を使わない（既定 {MIN_CROP_SIDE:g} = 抽出時と同じ。0 で判定しない）")
+    parser.add_argument("--max-shoulder-reverse", type=float, default=0.0,
+                        help="顔の採用基準: 肩の左右逆転量（肩のx差÷人物の高さ）がこの値以上の画像（後ろ向き・強い横向き）を使わない（目安 0.10。既定 0 = 判定しない。骨格ルール有効時のみ）")
     parser.add_argument("--accept-all", action="store_true",
                         help="顔の採用基準を適用せず、抽出した顔を全て使う（--no-face-gate --min-eye-ratio 0 --min-crop-side 0 と同じ）")
 
@@ -30,7 +32,7 @@ def _add_gate_args(parser: argparse.ArgumentParser) -> None:
 def _gate_filter(args):
     from .core.report.gate import GateFilter
     return (GateFilter.accept_all() if args.accept_all
-            else GateFilter(not args.no_face_gate, args.min_eye_ratio, args.min_crop_side))
+            else GateFilter(not args.no_face_gate, args.min_eye_ratio, args.min_crop_side, args.max_shoulder_reverse))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--video-root", required=True, help=r"映像ルートフォルダ（ルート\ロケーション\カメラID\*.mp4）")
     e.add_argument("--out", required=True, help="顔画像出力先ルートフォルダ")
     e.add_argument("--interval", type=float, default=0.5, help="抽出頻度(秒)。追跡IDごとにこの間隔で出力（既定 0.5）")
+    e.add_argument("--estimate-foot", action="store_true",
+                   help="足首が取れない場合の足元（foot_xy）を、足首の遷移から推測する")
     e.add_argument("--video", action="append", default=[],
                    help="処理する映像ファイル名（複数指定可）。省略時はルート配下の全映像")
 
@@ -176,7 +180,7 @@ def _extract(args) -> int:
         print("処理対象の映像がありません", file=sys.stderr)
         return 1
     results, run_dir = run_extraction(videos, Path(args.out), args.interval, status=print,
-                                      progress=lambda i, n, f, t: None)
+                                      progress=lambda i, n, f, t: None, estimate_foot=args.estimate_foot)
     faces = sum(r.image_count for r in results)
     tracks = sum(r.track_count for r in results)
     print(f"完了: 映像 {len(results)} 本 / 追跡ID {tracks} / 顔画像 {faces} 枚"

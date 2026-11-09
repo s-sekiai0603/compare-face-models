@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
+    QButtonGroup, QCheckBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
     QRadioButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -95,8 +95,19 @@ class VerifyFaceSizeScreen(QWidget):
 
         self.gate_row = GateFilterRow({"report_face_gate": self.settings["face_gate"],
                                        "report_min_eye_ratio": self.settings["min_eye_ratio"],
-                                       "report_min_crop_side": self.settings["min_crop_side"]})
+                                       "report_min_crop_side": self.settings["min_crop_side"],
+                                       "report_max_shoulder_reverse": self.settings["max_shoulder_reverse"]})
         root.addWidget(self.gate_row)
+
+        self.cb_grayscale = QCheckBox("特徴量抽出前に顔画像をグレースケール化 + 明るさ補正する（ライティングによる色味・明暗の違いを抑える）")
+        self.cb_grayscale.setChecked(bool(self.settings["grayscale"]))
+        self.cb_grayscale.setToolTip("アライン後の顔画像に明るさ補正（CLAHE。LAB の L チャネル）を掛け、グレースケール化（3 チャネルに戻す）してから特徴量化する。比較対象・検証対象の両方に適用し、特徴量キャッシュは別ファイルになる")
+        root.addWidget(self.cb_grayscale)
+
+        self.cb_align168 = QCheckBox("168×168 アライメント（168×168 でアラインしてから 112×112 に縮小して特徴量化する）")
+        self.cb_align168.setChecked(bool(self.settings["align168"]))
+        self.cb_align168.setToolTip("通常は 112×112 でアラインする。ONにすると 168×168 でアラインし、特徴量モデルへ渡す直前に 112×112 へ縮小（INTER_AREA）する。比較対象・検証対象の両方に適用し、特徴量キャッシュは別ファイルになる")
+        root.addWidget(self.cb_align168)
 
         # モデル選択（レジストリへの登録でラジオが増える）
         self.model_group, self.model_buttons = add_model_box(
@@ -161,7 +172,9 @@ class VerifyFaceSizeScreen(QWidget):
             output_mode=self.selected_mode(), track_dirs=self.track_dirs(), gallery_dir=self.gallery_edit.text(),
             output_dir=self.out_edit.text(),
             model=self.selected_model(), landmark=self.selected_landmark(), face_gate=gate["report_face_gate"],
-            min_eye_ratio=gate["report_min_eye_ratio"], min_crop_side=gate["report_min_crop_side"])
+            min_eye_ratio=gate["report_min_eye_ratio"], min_crop_side=gate["report_min_crop_side"],
+            max_shoulder_reverse=gate["report_max_shoulder_reverse"], grayscale=self.cb_grayscale.isChecked(),
+            align168=self.cb_align168.isChecked())
         save_verify_face_size_settings(self.settings)
 
     # ---- レポート出力 ----
@@ -181,7 +194,7 @@ class VerifyFaceSizeScreen(QWidget):
         self.worker = VerifyFaceSizeWorker(
             track_dirs=[Path(d) for d in dirs], output_dir=Path(self.out_edit.text()),
             model_name=self.selected_model(), landmark_name=self.selected_landmark(), gate_filter=self.gate_row.value(),
-            mode=mode, gallery_dir=Path(self.gallery_edit.text()) if self.gallery_edit.text() else None)
+            grayscale=self.cb_grayscale.isChecked(), align168=self.cb_align168.isChecked(), mode=mode, gallery_dir=Path(self.gallery_edit.text()) if self.gallery_edit.text() else None)
         self.worker.progress.connect(self.status.setText)
         self.worker.finished_ok.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)

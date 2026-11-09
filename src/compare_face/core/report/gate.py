@@ -20,6 +20,7 @@ class GateFilter:
     face_visible: bool = True               # 骨格ルール（鼻+片目が見える / 下向きでない）を適用する
     min_eye_ratio: float = MIN_EYE_RATIO    # 両目間隔÷顔幅のしきい値（両目が見える画像だけ判定）。0 で判定しない
     min_crop_side: float = MIN_CROP_SIDE    # 切り出し box の短辺(px) のしきい値。0 で判定しない
+    max_shoulder_reverse: float = 0.0       # 肩の左右逆転量÷人物の高さがこの値以上（後ろ向き・強い横向き）を除く。骨格ルールが有効なときだけ適用。0 で判定しない
 
     @classmethod
     def accept_all(cls) -> "GateFilter":
@@ -36,7 +37,10 @@ class GateFilter:
     def describe(self) -> str:
         if not self.enabled():
             return "適用しない（抽出した顔を全て使う）"
-        parts = ["骨格ルール（鼻+片目 / 下向きでない）" if self.face_visible else "骨格ルールなし",
+        rule = "骨格ルール（鼻+片目 / 下向きでない"
+        if self.face_visible and self.max_shoulder_reverse > 0:
+            rule += f" / 肩の逆転 < {self.max_shoulder_reverse:g}"
+        parts = [rule + "）" if self.face_visible else "骨格ルールなし",
                  f"両目間隔比 >= {self.min_eye_ratio:g}" if self.min_eye_ratio > 0 else "両目間隔比の判定なし",
                  f"切り出し短辺 >= {self.min_crop_side:g}px" if self.min_crop_side > 0 else "切り出し短辺の判定なし"]
         text = " / ".join(parts)
@@ -47,6 +51,9 @@ class GateFilter:
         parts = []
         if self.face_visible and e.face_visible is False:
             parts.append(e.gate_reason or "鼻または目が見えない / 下向きの顔")  # 骨格ルールは抽出時の最初の判定なので理由が残っている
+        if (self.face_visible and self.max_shoulder_reverse > 0 and e.shoulder_reverse is not None
+                and e.shoulder_reverse >= self.max_shoulder_reverse):
+            parts.append(f"肩の左右が逆（{e.shoulder_reverse:.2f} >= {self.max_shoulder_reverse:g}。後ろ向き・強い横向き）")
         if self.min_eye_ratio > 0 and e.eye_ratio is not None and e.eye_ratio < self.min_eye_ratio:
             parts.append(f"両目間隔比 {e.eye_ratio:.2f} < {self.min_eye_ratio:g}（横顔）")
         if self.min_crop_side > 0 and e.crop_min_side is not None and e.crop_min_side < self.min_crop_side:

@@ -30,6 +30,7 @@ OUTPUT_MODES = {
     "rank": "対象画像の類似度順位レポート出力",
     "both": "すべて",
 }
+ALIGN_SIZE_WIDE = 168  # 「168×168 アライメント」: アラインをこのサイズで行ってから特徴量モデルの入力サイズへ縮小する
 ROUND_DIGITS = 4  # 類似度を小数 4 桁に丸めて比べる（検索元セット検索の順位と同じ。同じ値は「高い」に数えない）
 
 
@@ -171,8 +172,12 @@ def write_misidentify_log(path: Path, entries: list[GalleryEntry], nontargets: l
 # ---- 実行 ----
 def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_name: str, landmark_name: str,
                          gate_filter: GateFilter | None = None, mode: str = "similarity", gallery_dir: Path | str | None = None,
-                         progress=lambda s: None, echo=print) -> tuple[Path, PhaseLogger]:
+                         progress=lambda s: None, echo=print, grayscale: bool = False,
+                         align168: bool = False) -> tuple[Path, PhaseLogger]:
     """顔サイズ別精度検証のレポートを出力する（GUI 非依存）。mode は OUTPUT_MODES のキー。
+    grayscale=True: アライン後の顔画像に明るさ補正（CLAHE）を掛け、グレースケール化してから特徴量化する（比較対象・検証対象とも。
+    キャッシュは別ファイル）。
+    align168=True: アラインを 112×112 ではなく 168×168 で行い、特徴量モデルへ渡す直前に 112×112 へ縮小する（キャッシュは別ファイル）。
     誤識別の枚数レポート（misidentify / both）には比較対象フォルダ gallery_dir が必要。"""
     from .verify_face_size_excel import VerifyConditions, build_verify_face_size_report
 
@@ -185,6 +190,8 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
     log = PhaseLogger(echo=lambda m: (echo(m), progress(m)))
     generated = datetime.now()
     gate_filter = gate_filter or GateFilter()
+    align_size = ALIGN_SIZE_WIDE if align168 else None
+    variant = "_".join(v for v in ("gray_clahe" if grayscale else "", f"align{align_size}" if align_size else "") if v)
     output_dir = Path(output_dir)
     gallery_path = Path(gallery_dir) if want_gal else None
     with log.phase(f"初期化・モデルロード（特徴量: {model_name} / ランドマーク: {landmark_name}）"):
@@ -223,13 +230,15 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
             rec.note = (f"非対象者 {len(nontargets)} 件 / 追跡ID {len({g.track_key for g in nontargets})} 件"
                         f" / 無効画像 {sum(1 for g in gallery_all if g.invalid)} 件・採用基準外 {n_gate_g} 件を除外")
         with log.phase("比較対象 顔特徴量抽出") as rec:
-            cache = EmbeddingCache(gallery_path, model_name, landmark_name)
+            cache = EmbeddingCache(gallery_path, model_name, landmark_name, variant=variant)
             cache.load()
             nt_emb, g_stats = embed_entries(extractor, aligner, nontargets,
-                                            lambda i, n: progress(f"比較対象の顔特徴量を計算中… ({i}/{n})"), cache)
+                                            lambda i, n: progress(f"比較対象の顔特徴量を計算中… ({i}/{n})"), cache,
+                                            clahe=grayscale, grayscale=grayscale, align_size=align_size)
             rec.note = f"{len(nontargets)} 枚 / {_stats_note(g_stats, extractor.needs_landmarks)}"
     with log.phase("検証対象 顔特徴量抽出") as rec:
-        emb, stats = embed_entries(extractor, aligner, entries, lambda i, n: progress(f"顔特徴量を計算中… ({i}/{n})"), cache)
+        emb, stats = embed_entries(extractor, aligner, entries, lambda i, n: progress(f"顔特徴量を計算中… ({i}/{n})"), cache,
+                                    clahe=grayscale, grayscale=grayscale, align_size=align_size)
         rec.note = f"{len(entries)} 枚 / {_stats_note(stats, extractor.needs_landmarks)}"
         if cache is not None:
             cache.save()
@@ -257,6 +266,6 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
             rec.note = f"{n} × {n - 1} 組 / 非対象者の追跡ID {n_tracks} 件の中での順位"
     cond = VerifyConditions(model_name, landmark_name, gate_filter.describe(), generated,
                             str(gallery_path) if want_gal else "", len(nontargets) if want_gal else None,
-                            n_nontarget_tracks=n_tracks if want_rank else None)
+                            n_nontarget_tracks=n_tracks if want_rank else None, grayscale=grayscale, align168=align168)
     build_verify_face_size_report(out, cond, entries, sim, log, counts, info_entries=sort_info_entries(entries), ranks=ranks)
     return out, log

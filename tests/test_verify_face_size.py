@@ -292,3 +292,19 @@ def test_info_sheet_layout_formula_images_and_order(tmp_path, monkeypatch):
     w = body_anchor.to.colOff - body_anchor._from.colOff
     h = body_anchor.to.rowOff - body_anchor._from.rowOff
     assert w / h == pytest.approx(50 / 120, rel=0.02)
+
+
+def test_grayscale_option(tmp_path, monkeypatch):
+    import numpy as np
+    import compare_face.core.report.verify_face_size as vfs
+    from compare_face.core.report.pipeline import to_gray_bgr
+    bgr = np.zeros((4, 4, 3), np.uint8)
+    bgr[..., 2] = 200  # 赤
+    g = to_gray_bgr(bgr)
+    assert g.shape == bgr.shape and (g[..., 0] == g[..., 1]).all() and (g[..., 1] == g[..., 2]).all()
+    monkeypatch.setattr(vfs, "get_extractor", lambda name: _MeanExtractor())
+    a = _track(tmp_path / "f", "Cam1", "v1", 1, [("20260311_000001_000", (60, 80)), ("20260311_000002_000", (30, 40))])
+    out, _ = run_verify_face_size([a], tmp_path / "rep", "AdaFace", "なし", grayscale=True, echo=lambda m: None)
+    ws = openpyxl.load_workbook(out)["条件"]
+    assert any(str(c.value).startswith("前処理 グレースケール") and str(ws.cell(row=c.row, column=2).value).startswith("あり")
+               for c in ws["A"])

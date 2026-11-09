@@ -69,6 +69,8 @@ class VerifyConditions:
     n_nontarget: int | None = None   # 非対象者の画像数（誤識別レポートのとき）
     log_text_name: str = ""          # 誤認した画像の一覧（テキストファイル名。誤識別レポートのとき）
     n_nontarget_tracks: int | None = None   # 非対象者の追跡ID数（順位レポートのとき）
+    grayscale: bool = False          # アライン後の顔画像を明るさ補正（CLAHE）+ グレースケール化してから特徴量化したか
+    align168: bool = False           # 168×168 でアラインしてから 112×112 に縮小して特徴量化したか
 
 
 def sim_fill(sim: float) -> PatternFill:
@@ -333,6 +335,8 @@ def _build_conditions(ws, cond: VerifyConditions, entries: list[GalleryEntry]) -
         ("顔特徴量抽出モデル", cond.model_name),
         ("顔ランドマークモデル", cond.landmark_name),
         ("顔の採用基準", cond.gate_filter_text),
+        ("前処理 グレースケール化 + 明るさ補正（CLAHE）", "あり（アライン後の顔画像に適用）" if cond.grayscale else "なし"),
+        ("前処理 168×168 アライメント", "あり（168×168 でアライン → 112×112 に縮小して特徴量化）" if cond.align168 else "なし"),
         ("画像数", len(entries)),
         ("追跡ID数", len({e.track_key for e in entries})),
     ]

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ..extract.face_crop import KP_CONF_TH
+
 _FACE_RE = re.compile(r"^(?P<ts>.+)_face\.jpg$")
 _TS_RE = re.compile(r"^(\d{8})_(\d{6})(?:_(\d{3}))?$")
 
@@ -53,6 +55,7 @@ class GalleryEntry:
     gate_reason: str = ""              # 採用基準に外れた理由（抽出時の判定）
     face_visible: bool | None = None   # 骨格ルール（鼻+片目が見える / 下向きでない）を通ったか。判定値の無い古い抽出結果は None
     crop_min_side: float | None = None  # 切り出し box の短辺(px)。品質ガードの判定値。古い抽出結果は None
+    shoulder_reverse: float | None = None  # 肩の左右の逆転量（画像の左側に人物の左肩がある度合い）÷人物 bbox の高さ。正なら後ろ向き・強い横向き。肩が見えない・古い抽出結果は None
     invalid: bool = False              # 無効画像（別人の骨格を含む等）。比較に使わない
     invalid_reason: str = ""
     pose: tuple[float, float, float] | None = None  # レポート時に推定した頭部姿勢 (yaw, pitch, roll)[度]
@@ -118,6 +121,17 @@ def _bbox_side(bbox, axis: int) -> float | None:
         return None
 
 
+def _shoulder_reverse(im: dict) -> float | None:
+    """keypoints（COCO-17）の左肩(5)・右肩(6)から肩の左右の逆転量を求める。正面向きなら人物の左肩は画像の右側にあるので負になる。"""
+    kp, box = im.get("keypoints"), im.get("bbox_xyxy")
+    if not kp or len(kp) < 7 or not box or len(box) < 4:
+        return None
+    ls, rs = kp[5], kp[6]
+    if ls["conf"] < KP_CONF_TH or rs["conf"] < KP_CONF_TH or box[3] <= box[1]:
+        return None
+    return (rs["x"] - ls["x"]) / (box[3] - box[1])
+
+
 def _make_entry(face: Path, cache: _TrackMetaCache) -> GalleryEntry | None:
     m = _FACE_RE.match(face.name)
     if not m:
@@ -156,6 +170,7 @@ def _make_entry(face: Path, cache: _TrackMetaCache) -> GalleryEntry | None:
         gate_reason=im.get("gate_reason") or "",
         face_visible=im.get("face_visible"),
         crop_min_side=im.get("crop_min_side"),
+        shoulder_reverse=_shoulder_reverse(im),
         invalid=bool(im.get("invalid", False)),
         invalid_reason=im.get("invalid_reason") or "",
     )

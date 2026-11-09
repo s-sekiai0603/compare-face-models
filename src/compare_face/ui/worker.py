@@ -14,11 +14,13 @@ class ExtractWorker(QThread):
     done = Signal(list, str, bool)         # 結果一覧, 出力先, キャンセル有無
     failed = Signal(str)
 
-    def __init__(self, videos: list[VideoInfo], output_root: Path, interval_sec: float):
+    def __init__(self, videos: list[VideoInfo], output_root: Path, interval_sec: float,
+                 estimate_foot: bool = False):
         super().__init__()
         self.videos = videos
         self.output_root = output_root
         self.interval_sec = interval_sec
+        self.estimate_foot = estimate_foot
         self._cancel = False
 
     def cancel(self) -> None:
@@ -28,7 +30,8 @@ class ExtractWorker(QThread):
         try:
             results, run_dir = run_extraction(
                 self.videos, self.output_root, self.interval_sec,
-                status=self.status.emit, progress=self.progress.emit, is_cancelled=lambda: self._cancel)
+                status=self.status.emit, progress=self.progress.emit, is_cancelled=lambda: self._cancel,
+                estimate_foot=self.estimate_foot)
             self.done.emit(results, str(run_dir), self._cancel)
         except Exception as e:
             self.failed.emit(str(e))
