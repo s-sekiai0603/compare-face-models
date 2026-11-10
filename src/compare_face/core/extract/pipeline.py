@@ -26,6 +26,8 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from ..camera.distortion import Distortion, Remapper
+from .history import load_fisheye_lambdas, write_history
 from .tracker import PersonTracker, TrackedPerson
 from .face_crop import KP_CONF_TH, attach_faces, crop_guard_reason, evaluate_face_gate, make_face_crop, quality_score
 from .face_detector import FaceDetector
@@ -91,9 +93,10 @@ def decide_output(last_accepted: float | None, last_rejected: float | None, cur_
 class _Decoder(threading.Thread):
     """映像デコード専用スレッド。(frame_index, frame) をキューへ先読みする。"""
 
-    def __init__(self, cap: cv2.VideoCapture):
+    def __init__(self, cap: cv2.VideoCapture, transform: Callable[[np.ndarray], np.ndarray] | None = None):
         super().__init__(daemon=True)
         self.cap = cap
+        self.transform = transform  # 各フレームへの前処理（魚眼補正）。デコードスレッドで行う
         self.q: queue.Queue = queue.Queue(maxsize=DECODE_PREFETCH)
         self.stop_event = threading.Event()
         self.error: Exception | None = None
@@ -114,6 +117,8 @@ class _Decoder(threading.Thread):
                 ok, frame = self.cap.read()
                 if not ok:
                     break
+                if self.transform is not None:
+                    frame = self.transform(frame)
                 if not self._put((fi, frame)):
                     return
                 fi += 1
@@ -288,13 +293,20 @@ def extract_video(
     is_cancelled: Callable[[], bool] | None = None,
     location: str = "",
     estimate_foot: bool = False,
+    fisheye_lambda: float | None = None,
 ) -> ExtractResult:
     """out_dir = 出力先/日時/カメラID/映像名(拡張子なし)。直下に追跡ID毎のフォルダを作る。
-    estimate_foot=True: 足首が取れない記録の foot_xy を、足首の遷移から推測した位置にする（estimate_foot_by_motion）。"""
+    estimate_foot=True: 足首が取れない記録の foot_xy を、足首の遷移から推測した位置にする（estimate_foot_by_motion）。
+    fisheye_lambda: 指定すると、各フレームを魚眼補正（レンズ歪みの補正。垂直補正はしない）してから処理する。
+    画像・json の座標はすべて補正後のフレームのもの（json に fisheye_corrected / fisheye_lambda を記録）。"""
     result = ExtractResult(video_path=video_path, out_dir=out_dir)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"映像を開けません: {video_path}")
+    transform = None
+    if fisheye_lambda is not None:
+        size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        transform = Remapper(Distortion(fisheye_lambda, size)).apply
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     start_dt = parse_capture_datetime(video_path.name)
@@ -304,7 +316,7 @@ def extract_video(
     records: dict[int, list[dict]] = {}
     foot_obs: dict[int, list[tuple[float, float, float]]] = {}  # 追跡ID -> 毎フレームの足首の観測（秒, x, y）。推測用
     frame_size: tuple[int, int] | None = None
-    decoder = _Decoder(cap)
+    decoder = _Decoder(cap, transform)
     writer = _ImageWriter()
     decoder.start()
 
@@ -419,7 +431,8 @@ def extract_video(
             _apply_foot_estimates(records, foot_obs, frame_size)
         for tid, imgs in records.items():
             data = {"track_id": tid, "video_file": video_path.name,
-                    "location": location, "images": imgs}
+                    "location": location, "fisheye_corrected": fisheye_lambda is not None,
+                    "fisheye_lambda": fisheye_lambda, "images": imgs}
             (out_dir / str(tid)).mkdir(parents=True, exist_ok=True)
             (out_dir / str(tid) / f"{tid}.json").write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -443,12 +456,21 @@ def run_extraction(
     progress: Callable[[int, int, int, int], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
     estimate_foot: bool = False,
+    fisheye_correct: bool = False,
+    camera_dir: Path | str | None = None,
+    inputs: dict | None = None,
 ) -> tuple[list[ExtractResult], Path]:
     """複数映像の抽出（GUI 非依存。ui/worker.py と cli.py の両方から呼ぶ）。
-    progress は (映像index, 映像数, フレーム, 総フレーム)。戻り値は (結果一覧, 出力先フォルダ)。"""
+    progress は (映像index, 映像数, フレーム, 総フレーム)。戻り値は (結果一覧, 出力先フォルダ)。
+    fisheye_correct=True: camera_dir の <カメラID>.json の歪み補正（λ）で各フレームを魚眼補正してから処理する。
+    設定ファイルが無い・魚眼補正の情報が無いカメラがあれば、処理を始める前に FisheyeConfigError で終了する。
+    inputs: 画面で入力した内容。全映像の処理後に 抽出履歴.json として日時フォルダ直下へ出力する。"""
     from .face_detector import prepare_face_detector
     from .pose_model import prepare_pose_detector
 
+    lambdas: dict[str, float] = {}
+    if fisheye_correct:
+        lambdas = load_fisheye_lambdas(camera_dir, [v.camera_id for v in videos])
     status("モデルを準備しています...")
     pose = prepare_pose_detector(log=status)
     face = prepare_face_detector(log=status)
@@ -461,8 +483,23 @@ def run_extraction(
             v.path, out_dir, pose, face, interval_sec,
             progress=(lambda f, t, i=i: progress(i, len(videos), f, t)) if progress else None,
             is_cancelled=is_cancelled, location=v.location, estimate_foot=estimate_foot,
+            fisheye_lambda=lambdas[v.camera_id] if fisheye_correct else None,
         )
         results.append(res)
         if res.cancelled:
             break
+    history = {
+        "executed_at": datetime.now().isoformat(timespec="seconds"),
+        **(inputs or {}),
+        "interval_sec": interval_sec,
+        "estimate_foot": estimate_foot,
+        "fisheye_correct": fisheye_correct,
+        "camera_dir": str(camera_dir) if fisheye_correct and camera_dir else "",
+        "fisheye_lambdas": lambdas,        # カメラID -> 歪み係数 λ（魚眼補正したときだけ）
+        "cancelled": any(r.cancelled for r in results),
+        "videos": [{"camera_id": v.camera_id, "location": v.location, "file_name": v.file_name, "path": str(v.path),
+                    "tracks": r.track_count, "images": r.image_count, "cancelled": r.cancelled}
+                   for v, r in zip(videos, results)],
+    }
+    write_history(run_dir, history)
     return results, run_dir

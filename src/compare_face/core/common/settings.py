@@ -13,6 +13,8 @@ DEFAULTS = {
     "output_root": "",
     "interval_sec": DEFAULT_INTERVAL_SEC,
     "estimate_foot": False,          # 抽出: 足首が取れない場合は足元を動きから推測する
+    "fisheye_correct": False,        # 抽出: 映像のフレームを魚眼補正してから処理する
+    "extract_camera_dir": "",        # 抽出: カメラ設定フォルダ（<カメラID>.json。魚眼補正に使う）
     "report_mode": "顔画像指定",
     "report_query_path": "",
     "report_track_dir": "",
@@ -70,6 +72,8 @@ VERIFY_FACE_SIZE_DEFAULTS = {
     "track_dirs": [""] * VERIFY_FACE_SIZE_TRACK_COUNT,
     "gallery_dir": "",                # 比較対象フォルダ（誤識別となる画像の枚数レポートで使う）
     "output_dir": "",
+    "camera_image_dir": "",           # カメラ画像フォルダ（<カメラID>.png。距離の算出に使う画像サイズをここの画像から取る）
+    "camera_dir": "",                 # カメラ設定フォルダ（射影変換設定抽出画面の出力先。<カメラID>.json）。レポートの「距離」の算出に使う
     "model": "AdaFace",
     "landmark": "なし",
     "face_gate": True,
@@ -121,6 +125,33 @@ def load_face_size_map_settings(path: Path = FACE_SIZE_MAP_SETTINGS_PATH) -> dic
 
 
 def save_face_size_map_settings(settings: dict, path: Path = FACE_SIZE_MAP_SETTINGS_PATH) -> None:
+    save_settings(settings, path)
+
+
+# ---- 距離・向き・精度分析画面の設定（画面専用のファイル。最後に選んだ Excel を保存して次回起動時に復元する） ----
+DISTANCE_POSE_CHART_SETTINGS_PATH = PROJECT_ROOT / "distance_pose_chart_screen_setting.json"
+
+DISTANCE_POSE_CHART_DEFAULTS = {
+    "excel_path": "",    # チャートを追加する Excel（顔サイズ別精度検証のレポート）
+    "split_lr": False,   # 顔の向きをチャートの左右に振り分ける（横軸を中心 0 m の左右にとる）
+    "unit_m": 0.0,       # 距離の集計単位(m)。0 = 集計しない（画像 1 枚ずつプロット）
+    "all_cameras": True,     # 出力対象: すべてのカメラを 1 チャートにプロット
+    "per_camera": False,     # 出力対象: カメラIDごとに 1 チャートずつプロット
+}
+
+
+def load_distance_pose_chart_settings(path: Path = DISTANCE_POSE_CHART_SETTINGS_PATH) -> dict:
+    data = dict(DISTANCE_POSE_CHART_DEFAULTS)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data.update({k: loaded[k] for k in data if k in loaded})
+    except (OSError, ValueError):
+        pass
+    return data
+
+
+def save_distance_pose_chart_settings(settings: dict, path: Path = DISTANCE_POSE_CHART_SETTINGS_PATH) -> None:
     save_settings(settings, path)
 
 

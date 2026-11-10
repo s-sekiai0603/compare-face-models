@@ -11,6 +11,7 @@ class TopScreen(QWidget):
     verify_face_size_requested = Signal()
     face_size_map_requested = Signal()
     camera_projection_requested = Signal()
+    distance_pose_chart_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -25,7 +26,8 @@ class TopScreen(QWidget):
         btn_verify = QPushButton("顔サイズ別精度検証")
         btn_map = QPushButton("指定顔サイズ以上で見える画角範囲確認")
         btn_proj = QPushButton("カメラ画像の射影変換設定抽出")
-        for b in (btn_extract, btn_report, btn_query_set, btn_verify, btn_map, btn_proj):
+        btn_chart = QPushButton("距離・顔向・顔識別精度チャート出力")
+        for b in (btn_extract, btn_report, btn_query_set, btn_verify, btn_map, btn_proj, btn_chart):
             b.setMinimumHeight(48)
             layout.addWidget(b)
         layout.addStretch()
@@ -35,3 +37,4 @@ class TopScreen(QWidget):
         btn_verify.clicked.connect(self.verify_face_size_requested.emit)
         btn_map.clicked.connect(self.face_size_map_requested.emit)
         btn_proj.clicked.connect(self.camera_projection_requested.emit)
+        btn_chart.clicked.connect(self.distance_pose_chart_requested.emit)

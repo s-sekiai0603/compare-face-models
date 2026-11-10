@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.common.settings import load_settings, save_settings
+from ..core.extract.history import FisheyeConfigError, load_fisheye_lambdas
 from ..core.extract.video_scanner import VideoInfo, format_duration, scan_videos
 from .worker import ExtractWorker
 
@@ -55,6 +56,15 @@ class ExtractScreen(QWidget):
             "足首が信頼度不足で取れない場合、同じ追跡IDのそれまでの足首の遷移から足元（foot_xy）を推測して出力する（X は顔 bbox の左右の中央、Y は遷移からの推測）。"
             "それまでの足首が無い場合は、それ以降の遷移から後追いで推測する（foot_source は estimated_past / estimated_future）")
         layout.addWidget(self.cb_estimate_foot)
+
+        self.cb_fisheye = QCheckBox("魚眼補正して抽出")
+        self.cb_fisheye.setChecked(bool(self.settings["fisheye_correct"]))
+        self.cb_fisheye.setToolTip(
+            "各フレームをカメラ設定ファイル（<カメラID>.json）の歪み補正で魚眼補正してから処理する（垂直補正はしない）。"
+            "全身画像・顔画像・追跡ID json の座標は補正後のフレームのものになり、日時フォルダ直下に抽出履歴.json を出力する。"
+            "以降のレポート等は履歴を見て補正済みとして扱う")
+        layout.addWidget(self.cb_fisheye)
+        self.camera_edit = self._folder_row(layout, "カメラ設定フォルダ", self.settings["extract_camera_dir"], self._pick_camera)
 
         self.table = QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
@@ -108,10 +118,17 @@ class ExtractScreen(QWidget):
             self.out_edit.setText(d)
             self._save()
 
+    def _pick_camera(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "カメラ設定フォルダを選択", self.camera_edit.text())
+        if d:
+            self.camera_edit.setText(d)
+            self._save()
+
     def _save(self) -> None:
         self.settings.update(video_root=self.root_edit.text(), output_root=self.out_edit.text(),
                              interval_sec=round(self.interval.value(), 1),
-                             estimate_foot=self.cb_estimate_foot.isChecked())
+                             estimate_foot=self.cb_estimate_foot.isChecked(),
+                             fisheye_correct=self.cb_fisheye.isChecked(), extract_camera_dir=self.camera_edit.text())
         save_settings(self.settings)
 
     def _set_all_checked(self, checked: bool) -> None:
@@ -142,8 +159,20 @@ class ExtractScreen(QWidget):
             QMessageBox.warning(self, "顔画像抽出", "顔画像出力先を指定してください。")
             return
         self._save()  # 抽出実行時の頻度を次回の既定値にする
-        self.worker = ExtractWorker([self.videos[r] for r in rows], Path(self.out_edit.text()),
-                                    self.interval.value(), self.cb_estimate_foot.isChecked())
+        videos = [self.videos[r] for r in rows]
+        fisheye = self.cb_fisheye.isChecked()
+        if fisheye:  # 実行直後に設定ファイルを確認する（不備があれば抽出しない）
+            try:
+                load_fisheye_lambdas(self.camera_edit.text(), [v.camera_id for v in videos])
+            except FisheyeConfigError as e:
+                QMessageBox.critical(self, "顔画像抽出", str(e))
+                return
+        inputs = {
+            "video_root": self.root_edit.text(), "output_root": self.out_edit.text(),
+            "selected_videos": [str(v.path) for v in videos],
+        }
+        self.worker = ExtractWorker(videos, Path(self.out_edit.text()), self.interval.value(),
+                                    self.cb_estimate_foot.isChecked(), fisheye, self.camera_edit.text(), inputs)
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._on_done)

@@ -89,6 +89,13 @@ class VerifyFaceSizeScreen(QWidget):
         self.gallery_edit = QLineEdit(self.settings["gallery_dir"])
         self.gallery_edit.setReadOnly(True)
         add_path_row(root, "比較対象フォルダ:", self.gallery_edit, self._pick_gallery)
+        # カメラ設定フォルダ（射影変換設定抽出画面の出力先。<カメラID>.json）。指定するとレポートの「距離」を算出する
+        self.camera_edit = QLineEdit(self.settings["camera_dir"])
+        self.camera_edit.setReadOnly(True)
+        add_path_row(root, "カメラ設定フォルダ:", self.camera_edit, self._pick_camera)
+        self.camera_image_edit = QLineEdit(self.settings["camera_image_dir"])  # 距離の算出に使う画像サイズの取得元（<カメラID>.png）
+        self.camera_image_edit.setReadOnly(True)
+        add_path_row(root, "カメラ画像フォルダ:", self.camera_image_edit, self._pick_camera_image)
         self.out_edit = QLineEdit(self.settings["output_dir"])
         self.out_edit.setReadOnly(True)
         add_path_row(root, "レポート出力先フォルダ:", self.out_edit, self._pick_output)
@@ -151,6 +158,16 @@ class VerifyFaceSizeScreen(QWidget):
         if d:
             self.gallery_edit.setText(d)
 
+    def _pick_camera(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "カメラ設定フォルダを選択（射影変換設定抽出画面の出力先）", self.camera_edit.text())
+        if d:
+            self.camera_edit.setText(d)
+
+    def _pick_camera_image(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "カメラ画像フォルダを選択（ファイル名 = カメラID.png）", self.camera_image_edit.text())
+        if d:
+            self.camera_image_edit.setText(d)
+
     def _pick_output(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "レポート出力先フォルダを選択", self.out_edit.text())
         if d:
@@ -170,7 +187,7 @@ class VerifyFaceSizeScreen(QWidget):
         self.gate_row.save_to(gate)
         self.settings.update(
             output_mode=self.selected_mode(), track_dirs=self.track_dirs(), gallery_dir=self.gallery_edit.text(),
-            output_dir=self.out_edit.text(),
+            output_dir=self.out_edit.text(), camera_dir=self.camera_edit.text(), camera_image_dir=self.camera_image_edit.text(),
             model=self.selected_model(), landmark=self.selected_landmark(), face_gate=gate["report_face_gate"],
             min_eye_ratio=gate["report_min_eye_ratio"], min_crop_side=gate["report_min_crop_side"],
             max_shoulder_reverse=gate["report_max_shoulder_reverse"], grayscale=self.cb_grayscale.isChecked(),
@@ -190,11 +207,17 @@ class VerifyFaceSizeScreen(QWidget):
         if needs_gallery(mode) and not self.gallery_edit.text():
             QMessageBox.warning(self, "顔サイズ別精度検証", "誤識別となる画像の枚数レポート・類似度順位レポートには比較対象フォルダの指定が必要です。")
             return
+        for edit, name in ((self.camera_edit, "カメラ設定フォルダ"), (self.camera_image_edit, "カメラ画像フォルダ")):
+            if edit.text() and not Path(edit.text()).is_dir():
+                QMessageBox.warning(self, "顔サイズ別精度検証", f"{name}が見つかりません。")
+                return
         self._save_settings()
         self.worker = VerifyFaceSizeWorker(
             track_dirs=[Path(d) for d in dirs], output_dir=Path(self.out_edit.text()),
             model_name=self.selected_model(), landmark_name=self.selected_landmark(), gate_filter=self.gate_row.value(),
-            grayscale=self.cb_grayscale.isChecked(), align168=self.cb_align168.isChecked(), mode=mode, gallery_dir=Path(self.gallery_edit.text()) if self.gallery_edit.text() else None)
+            grayscale=self.cb_grayscale.isChecked(), align168=self.cb_align168.isChecked(), mode=mode,
+            camera_dir=Path(self.camera_edit.text()) if self.camera_edit.text() else None,
+            camera_image_dir=Path(self.camera_image_edit.text()) if self.camera_image_edit.text() else None, gallery_dir=Path(self.gallery_edit.text()) if self.gallery_edit.text() else None)
         self.worker.progress.connect(self.status.setText)
         self.worker.finished_ok.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)

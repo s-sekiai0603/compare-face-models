@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--interval", type=float, default=0.5, help="抽出頻度(秒)。追跡IDごとにこの間隔で出力（既定 0.5）")
     e.add_argument("--estimate-foot", action="store_true",
                    help="足首が取れない場合の足元（foot_xy）を、足首の遷移から推測する")
+    e.add_argument("--fisheye-correct", action="store_true",
+                   help="フレームを魚眼補正してから処理する（--camera-dir の <カメラID>.json の歪み補正を使う）")
+    e.add_argument("--camera-dir", default="", help="カメラ設定フォルダ（射影変換設定抽出画面の出力先。<カメラID>.json）")
     e.add_argument("--video", action="append", default=[],
                    help="処理する映像ファイル名（複数指定可）。省略時はルート配下の全映像")
 
@@ -179,8 +182,15 @@ def _extract(args) -> int:
     if not videos:
         print("処理対象の映像がありません", file=sys.stderr)
         return 1
-    results, run_dir = run_extraction(videos, Path(args.out), args.interval, status=print,
-                                      progress=lambda i, n, f, t: None, estimate_foot=args.estimate_foot)
+    from .core.extract.history import FisheyeConfigError
+    inputs = {"video_root": args.video_root, "output_root": args.out}
+    try:
+        results, run_dir = run_extraction(videos, Path(args.out), args.interval, status=print,
+                                          progress=lambda i, n, f, t: None, estimate_foot=args.estimate_foot,
+                                          fisheye_correct=args.fisheye_correct, camera_dir=args.camera_dir, inputs=inputs)
+    except FisheyeConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
     faces = sum(r.image_count for r in results)
     tracks = sum(r.track_count for r in results)
     print(f"完了: 映像 {len(results)} 本 / 追跡ID {tracks} / 顔画像 {faces} 枚"

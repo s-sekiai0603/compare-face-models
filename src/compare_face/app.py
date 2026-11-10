@@ -5,6 +5,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 
 from .ui.camera_projection_screen import CameraProjectionScreen
+from .ui.distance_pose_chart_screen import DistancePoseChartScreen
 from .ui.extract_screen import ExtractScreen
 from .ui.face_size_map_screen import FaceSizeMapScreen
 from .ui.query_set_screen import QuerySetScreen
@@ -28,6 +29,7 @@ class MainWindow(QMainWindow):
         self.top.verify_face_size_requested.connect(self.show_verify_face_size)
         self.top.face_size_map_requested.connect(self.show_face_size_map)
         self.top.camera_projection_requested.connect(self.show_camera_projection)
+        self.top.distance_pose_chart_requested.connect(self.show_distance_pose_chart)
 
     def show_extract(self) -> None:
         # 画面を開くたびに生成し、前回保存した値を既定表示にする
@@ -62,6 +64,12 @@ class MainWindow(QMainWindow):
 
     def show_camera_projection(self) -> None:
         screen = CameraProjectionScreen()
+        screen.back_requested.connect(lambda: self._back(screen))
+        self.stack.addWidget(screen)
+        self.stack.setCurrentWidget(screen)
+
+    def show_distance_pose_chart(self) -> None:
+        screen = DistancePoseChartScreen()
         screen.back_requested.connect(lambda: self._back(screen))
         self.stack.addWidget(screen)
         self.stack.setCurrentWidget(screen)

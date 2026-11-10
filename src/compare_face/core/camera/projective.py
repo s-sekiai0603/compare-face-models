@@ -24,10 +24,11 @@ class ProjectionError(ValueError):
 @dataclass(frozen=True)
 class CameraProjection:
     homography: np.ndarray          # 画像 → 地面(m) 3x3
-    camera_xy: tuple[float, float]  # カメラ設置座標（画像座標系、画像外になり得る）
+    camera_xy: tuple[float, float] | None  # カメラ設置座標（画像座標系、画像外になり得る）。垂直補正後は無限遠なので None
     focal_px: float                 # 推定焦点距離(px)
     height_m: float                 # 推定カメラ高さ(m)
     vanishing_points: tuple = ()    # 長方形の 2 組の対辺の消失点 ((x, y), (x, y))。結ぶ直線が地平線
+    camera_ground: tuple[float, float] | None = None  # カメラ直下の地面点の地面座標(m)（距離の基準）
 
     def ground_xy(self, xy: tuple[float, float]) -> tuple[float, float]:
         p = self.homography @ np.array([xy[0], xy[1], 1.0])
@@ -36,7 +37,7 @@ class CameraProjection:
     def distance_m(self, xy: tuple[float, float]) -> float:
         """カメラ設置地点（直下）から画像座標 xy までの地面上の距離(m)。"""
         gx, gy = self.ground_xy(xy)
-        cx, cy = self.ground_xy(self.camera_xy)
+        cx, cy = self.camera_ground if self.camera_ground is not None else self.ground_xy(self.camera_xy)
         return float(np.hypot(gx - cx, gy - cy))
 
     def slant_distance_m(self, xy: tuple[float, float]) -> float:
@@ -57,9 +58,11 @@ def _intersect(a1, a2, b1, b2) -> np.ndarray:
 
 
 def compute_projection(points, side_a: float, side_b: float, image_size: tuple[int, int],
-                       focal_px: float | None = None) -> CameraProjection:
+                       focal_px: float | None = None, vertical=None) -> CameraProjection:
     """points: 画像座標 4 点（長方形を一周する順）。side_a = p0→p1 の長さ(m)、side_b = p1→p2 の長さ(m)。
-    image_size: (幅, 高さ)。主点を画像中心とみなす。focal_px を与えると焦点距離を推定せずその値を使う（実測距離による補正用）。"""
+    image_size: (幅, 高さ)。主点を画像中心とみなす。focal_px を与えると焦点距離を推定せずその値を使う（実測距離による補正用）。
+    vertical: 鉛直（下向き）方向のカメラ座標ベクトル。与えると長方形の消失点から求めず、これをカメラ直下の方向とする
+    （垂直補正後の画像用。(0, 1, 0) なら設置座標は画像の下方向の無限遠で camera_xy は None になる）。"""
     pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
     if side_a <= 0 or side_b <= 0:
         raise ProjectionError("辺の長さは 0 より大きい値を指定してください。")
@@ -93,22 +96,34 @@ def compute_projection(points, side_a: float, side_b: float, image_size: tuple[i
 
     d1 = k_inv @ np.array([q1[0], q1[1], 1.0])
     d2 = k_inv @ np.array([q2[0], q2[1], 1.0])
-    n = np.cross(d1 / np.linalg.norm(d1), d2 / np.linalg.norm(d2))  # 地面の法線（カメラ座標）
+    if vertical is None:
+        n = np.cross(d1 / np.linalg.norm(d1), d2 / np.linalg.norm(d2))  # 地面の法線（カメラ座標）
+    else:
+        n = np.asarray(vertical, dtype=np.float64)
     n /= np.linalg.norm(n)
     rays = [k_inv @ np.array([x, y, 1.0]) for x, y in pts]
     if n @ np.mean(rays, axis=0) < 0:
+        if vertical is not None:
+            raise ProjectionError("4 点が地平線より上にあります。地面上の長方形の 4 点を指定してください。")
         n = -n  # カメラから地面へ向かう向きにそろえる
     nadir = k @ n
     if abs(nadir[2]) < 1e-6:
-        raise ProjectionError("カメラが水平に近く、設置座標が無限遠になります。")
-    camera_xy = (float(nadir[0] / nadir[2]), float(nadir[1] / nadir[2]))
+        if vertical is None:
+            raise ProjectionError("カメラが水平に近く、設置座標が無限遠になります。")
+        camera_xy = None  # 垂直補正後: カメラ直下は画像の無限遠（地面座標には写せる）
+    else:
+        camera_xy = (float(nadir[0] / nadir[2]), float(nadir[1] / nadir[2]))
+    g = h @ nadir  # 同次座標のまま地面に写す（無限遠でもよい）
+    if abs(g[2]) < 1e-12:
+        raise ProjectionError("カメラ直下の地面座標を求められません（4 点の取り方を変えてください）。")
+    camera_ground = (float(g[0] / g[2]), float(g[1] / g[2]))
 
     # カメラ高さ: 地面までの距離 1 としたときの 3D 辺長と実際の辺長(m)の比
     p3d = [r / (n @ r) for r in rays]
     ratios = [side_a / np.linalg.norm(p3d[1] - p3d[0]), side_b / np.linalg.norm(p3d[2] - p3d[1]),
               side_a / np.linalg.norm(p3d[2] - p3d[3]), side_b / np.linalg.norm(p3d[3] - p3d[0])]
     return CameraProjection(h, camera_xy, f, float(np.mean(ratios)),
-                            ((float(q1[0]), float(q1[1])), (float(q2[0]), float(q2[1]))))
+                            ((float(q1[0]), float(q1[1])), (float(q2[0]), float(q2[1]))), camera_ground)
 
 
 def clip_line_to_rect(p1, p2, width: float, height: float):
@@ -173,20 +188,28 @@ def calibrate_focal(points, side_a: float, side_b: float, image_size: tuple[int,
 
 # ---- 設定ファイル（<画像名>.json） ----
 def save_config(path: Path, image_name: str, points, long_m: float, short_m: float, first_side: str,
-                camera_xy: tuple[float, float], focal_px: float | None = None,
+                camera_xy: tuple[float, float] | None, focal_px: float | None = None,
                 ref_xy: tuple[float, float] | None = None, measured_m: float | None = None,
-                distortion: dict | None = None) -> None:
+                distortion: dict | None = None, rectification: dict | None = None) -> None:
     """focal_px / ref_xy / measured_m は実測距離で補正したときだけ記録する。
     distortion = {"lambda", "scale", "lines"} はレンズ歪みを補正したときだけ記録する。補正したときは points / camera_xy / ref_xy は
-    「補正後の画像」の座標（元画像の点は distortion.py の変換で補正後の座標に直してから使う）。lines は元画像の座標。"""
+    「補正後の画像」の座標（元画像の点は distortion.py の変換で補正後の座標に直してから使う）。lines は元画像の座標。
+    rectification = {"lines", "focal_px"} は垂直補正（vertical.py）をしたときだけ記録する。lines は垂直線（元画像の座標。
+    歪み補正後に垂直補正する）、focal_px は垂直補正に使った焦点距離。垂直補正したときは points / ref_xy は垂直補正後の画像の座標、
+    camera_xy は無限遠なので null。"""
     data = {
         "image": image_name,
         "points": [[float(x), float(y)] for x, y in points],
         "long_side_m": float(long_m),
         "short_side_m": float(short_m),
         "first_side": first_side,  # points[0]→points[1] の辺が long / short のどちらか
-        "camera_xy": [float(camera_xy[0]), float(camera_xy[1])],
+        "camera_xy": None if camera_xy is None else [float(camera_xy[0]), float(camera_xy[1])],
     }
+    if rectification is not None:
+        data["rectification"] = {
+            "lines": [[[float(x), float(y)] for x, y in line] for line in rectification["lines"]],
+            "focal_px": float(rectification["focal_px"]),
+        }
     if distortion is not None:
         data["distortion"] = {
             "lambda": float(distortion["lambda"]), "scale": float(distortion["scale"]),
@@ -216,7 +239,13 @@ def load_config(path: Path) -> dict | None:
         if dist is not None:
             distortion = {"lambda": float(dist["lambda"]), "scale": float(dist["scale"]),
                           "lines": [[(float(x), float(y)) for x, y in line] for line in dist["lines"]]}
-        return {"calibration": calibration, "distortion": distortion, "points": pts, "long_side_m": float(d["long_side_m"]), "short_side_m": float(d["short_side_m"]),
-                "first_side": d["first_side"], "camera_xy": tuple(float(v) for v in d["camera_xy"])}
+        rect = d.get("rectification")
+        rectification = None
+        if rect is not None:
+            rectification = {"lines": [tuple((float(x), float(y)) for x, y in line) for line in rect["lines"]],
+                             "focal_px": float(rect["focal_px"])}
+        cam = d["camera_xy"]
+        return {"calibration": calibration, "distortion": distortion, "rectification": rectification, "points": pts, "long_side_m": float(d["long_side_m"]), "short_side_m": float(d["short_side_m"]),
+                "first_side": d["first_side"], "camera_xy": None if cam is None else tuple(float(v) for v in cam)}
     except (OSError, ValueError, KeyError, TypeError):
         return None

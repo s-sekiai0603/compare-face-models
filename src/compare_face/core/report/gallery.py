@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..extract.face_crop import KP_CONF_TH
+from ..extract.history import fisheye_lambda_of_track
 
 _FACE_RE = re.compile(r"^(?P<ts>.+)_face\.jpg$")
 _TS_RE = re.compile(r"^(\d{8})_(\d{6})(?:_(\d{3}))?$")
@@ -62,6 +63,9 @@ class GalleryEntry:
     quality_norm: float | None = None  # 品質ノルム（AdaFace の特徴量ノルム。クエリ自動選別時に計算）
     gate_excluded_reason: str = ""     # レポート時の採用基準（gate.GateFilter）で外した理由（空なら使用）
     excluded_reason: str = ""          # クエリ自動選別で外した理由（空なら使用）
+    foot_xy: list | None = None        # 足元の点 [x, y]（フレーム座標。json の foot_xy。古い抽出結果は None）
+    fisheye_lambda: float | None = None  # 魚眼補正して抽出した結果なら補正の λ（座標・画像は補正後のフレーム）。None = 未補正（古い抽出結果を含む）
+    distance_m: float | None = None    # カメラ設定ファイルから算出した、カメラ直下から足元までの距離(m)（顔サイズ別精度検証のレポート用）
 
     @property
     def used(self) -> bool:
@@ -109,6 +113,7 @@ class _TrackMetaCache:
                 images = {im.get("file_face"): im for im in data.get("images", []) if im.get("file_face")}
             except (OSError, ValueError):
                 pass
+            meta["fisheye_lambda"] = fisheye_lambda_of_track(track_dir)  # 抽出履歴（日時フォルダ直下）から。無ければ追跡ID json
             self._cache[track_dir] = (meta, images)
         return self._cache[track_dir]
 
@@ -173,6 +178,8 @@ def _make_entry(face: Path, cache: _TrackMetaCache) -> GalleryEntry | None:
         shoulder_reverse=_shoulder_reverse(im),
         invalid=bool(im.get("invalid", False)),
         invalid_reason=im.get("invalid_reason") or "",
+        foot_xy=im.get("foot_xy"),
+        fisheye_lambda=meta.get("fisheye_lambda"),
     )
 
 
