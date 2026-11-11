@@ -345,6 +345,17 @@ def test_chart_targets_with_unit_filters_by_camera():
     assert len(both["すべてのカメラ"]) > len(cam1)
 
 
+def test_chart_targets_limited_to_selected_cameras():
+    data = _cam_data()
+    both = dpc.chart_targets(data, True, True, cameras=["cam1"])
+    assert [l for l, _ in both] == ["すべてのカメラ", "カメラ cam1"]                    # cam2 のチャートは出ない
+    assert len(both[0][1]) == 2 and all(p.cam_v == p.cam_h == "cam1" for p in both[0][1])   # すべて = 選んだカメラどうしだけ
+    both_u = dpc.chart_targets(data, True, True, unit_m=10.0, cameras={"cam2"})
+    assert [l for l, _ in both_u] == ["すべてのカメラ", "カメラ cam2"]
+    assert dpc.chart_targets(data, True, False, cameras=None)[0][1] == dpc.chart_targets(data, True, False)[0][1]
+    assert dpc.chart_targets(data, True, True, cameras=[]) == []                      # 何も選ばなければ点なし
+
+
 @_FONT
 def test_add_chart_sheet_all_and_each_camera_stacks_charts(tmp_path, monkeypatch):
     out = _report(tmp_path, monkeypatch)

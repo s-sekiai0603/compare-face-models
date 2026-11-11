@@ -19,6 +19,7 @@ import math
 import os
 import re
 import zipfile
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -209,19 +210,21 @@ def read_chart_data(xlsx: Path | str) -> ChartData:
     return data
 
 
-def aggregate_points(data: ChartData, unit_m: float, camera: str | None = None) -> list[ChartPoint]:
+def aggregate_points(data: ChartData, unit_m: float, camera: str | Collection[str] | None = None) -> list[ChartPoint]:
     """距離の集計単位（unit_m）ごとに点をまとめる。縦・横それぞれの画像を「顔の向き × 距離の区間（unit_m 刻み）」でグループにし、
     縦グループ × 横グループの組合せごとに、
     - 色: 「誤識別数まとめ」のセルの値（対角を除く）の平均から決める（count_fill）
     - 位置: 横グループの距離の平均（横）・縦グループの距離の平均（縦）
-    の 1 点にする。顔の向き・距離が読めない画像は除く。camera を指定すると、そのカメラの画像どうしだけで集計する。"""
+    の 1 点にする。顔の向き・距離が読めない画像は除く。camera（カメラID 1 つ、または複数）を指定すると、そのカメラの画像どうしだけで集計する。"""
     if unit_m <= 0:
         raise ValueError("距離の集計単位は 0 より大きい値にしてください。")
+
+    allowed = None if camera is None else ({camera} if isinstance(camera, str) else set(camera))
 
     def groups(items: list, cams: list) -> dict[tuple, list[int]]:
         g: dict[tuple, list[int]] = {}
         for i, (dist, direction) in enumerate(items):
-            if dist is None or direction is None or (camera is not None and (cams[i] if i < len(cams) else "") != camera):
+            if dist is None or direction is None or (allowed is not None and (cams[i] if i < len(cams) else "") not in allowed):
                 continue
             g.setdefault((direction, math.floor(dist / unit_m + 1e-9)), []).append(i)
         return g
@@ -241,21 +244,35 @@ def aggregate_points(data: ChartData, unit_m: float, camera: str | None = None) 
     return out
 
 
+def list_cameras(xlsx: Path | str) -> list[str]:
+    """Excel の「比較結果誤識別数まとめ」に出てくるカメラID（昇順）。"""
+    return cameras_of(read_chart_data(xlsx))
+
+
 def cameras_of(data: ChartData) -> list[str]:
     """画像のカメラID（重複なし・昇順）。"""
     return sorted({c for c in data.ver_cam + data.hor_cam if c})
 
 
-def chart_targets(data: ChartData, all_cameras: bool, per_camera: bool, unit_m: float = 0.0) -> list[tuple[str, list[ChartPoint]]]:
+def chart_targets(data: ChartData, all_cameras: bool, per_camera: bool, unit_m: float = 0.0,
+                  cameras: Collection[str] | None = None) -> list[tuple[str, list[ChartPoint]]]:
     """描くチャートの一覧 [(ラベル, 点)]。all_cameras = すべてのカメラを 1 チャートに / per_camera = カメラID ごとに 1 チャート。
-    カメラ個別は、縦・横の両方の画像がそのカメラのものである組合せだけを使う。点が無いチャートは含めない。"""
+    カメラ個別は、縦・横の両方の画像がそのカメラのものである組合せだけを使う。点が無いチャートは含めない。
+    cameras を指定すると、そのカメラIDの画像だけを対象にする（すべてのカメラ = 選んだカメラの画像どうし、カメラ個別 = 選んだカメラだけ）。"""
     if not all_cameras and not per_camera:
         raise ValueError("チャートの出力対象（すべてのカメラ / カメラ個別）を 1 つ以上選んでください。")
+    sel = None if cameras is None else set(cameras)
     out: list[tuple[str, list[ChartPoint]]] = []
     if all_cameras:
-        out.append((ALL_CAMERAS_LABEL, aggregate_points(data, unit_m) if unit_m > 0 else list(data.points)))
+        if unit_m > 0:
+            pts = aggregate_points(data, unit_m, sel)
+        else:
+            pts = [p for p in data.points if sel is None or (p.cam_v in sel and p.cam_h in sel)]
+        out.append((ALL_CAMERAS_LABEL, pts))
     if per_camera:
         for cam in cameras_of(data):
+            if sel is not None and cam not in sel:
+                continue
             pts = aggregate_points(data, unit_m, cam) if unit_m > 0 else [p for p in data.points if p.cam_v == cam and p.cam_h == cam]
             out.append((f"カメラ {cam}", pts))
     return [(label, pts) for label, pts in out if pts]
@@ -661,20 +678,21 @@ def _graft(target: Path, src: Path) -> None:
 
 
 def add_chart_sheet(xlsx: Path | str, icon_dir: Path | str = ICON_DIR, split_lr: bool = False, unit_m: float = 0.0,
-                    all_cameras: bool = True, per_camera: bool = False) -> ChartData:
+                    all_cameras: bool = True, per_camera: bool = False, cameras: Collection[str] | None = None) -> ChartData:
     """xlsx に「距離向き精度分析チャート」シートを追加する（あれば置き換える）。戻り値は読み取った内容（点の数など）。
     チャートは Python（Pillow）で描いた画像を貼り付ける（Excel のチャート機能は使わない）。
     split_lr=True: 横軸を中心 0 m の左右にとり、横の画像の顔の向きで左側 / 右側 / 両側に振り分ける。
     unit_m > 0: 距離の集計単位。縦・横それぞれ「顔の向き × 距離の区間」ごとに、セルの値の平均で色を、距離の平均で位置を決める（aggregate_points）。
     all_cameras: すべてのカメラを 1 チャートにプロット / per_camera: カメラIDごとに 1 チャートずつプロット（両方 True ならカメラ数 + 1 個。
-    同じシートに縦に並べる。どちらも False はエラー）。"""
+    同じシートに縦に並べる。どちらも False はエラー）。
+    cameras: 対象にするカメラID（None = すべて）。どちらの出力対象でも、ここで選んだカメラの画像だけを使う。"""
     path, icons = Path(xlsx), Path(icon_dir)
     if not path.is_file():
         raise ValueError(f"Excel ファイルが見つかりません: {path}")
     if not icons.is_dir():
         raise ValueError(f"アイコン画像フォルダが見つかりません: {icons}")
     data = read_chart_data(path)
-    charts = chart_targets(data, all_cameras, per_camera, unit_m)
+    charts = chart_targets(data, all_cameras, per_camera, unit_m, cameras)
     if not charts:
         raise ValueError("チャートに出せるデータがありません（距離・顔の向きが入った画像の組合せがありません）。"
                          "「対象画像情報」シートの「顔の向き」（正面 / 左横 / 右横 / 左斜め正面 / 右斜め正面）を入力してください。")

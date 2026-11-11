@@ -5,6 +5,7 @@ from PySide6.QtCore import QThread, Signal
 from ..core.features import WeightsUnavailable, get_extractor
 from ..core.landmarks import get_aligner
 from ..core.pose import get_pose_estimator
+from ..core.report.distance_range_map import run_distance_range_map
 from ..core.report.face_size_map import run_face_size_map
 from ..core.report.pipeline import run_report
 from ..core.report.query_set import run_query_set_search
@@ -95,13 +96,20 @@ class FaceSizeMapWorker(QThread):
     finished_ok = Signal(list, list)  # 出力ファイル（文字列）, スキップ・注意の説明
     failed = Signal(str)
 
+    run_func = staticmethod(run_face_size_map)
+
     def __init__(self, **kwargs):
         super().__init__()
         self.kwargs = kwargs
 
     def run(self) -> None:
         try:
-            outputs, notes = run_face_size_map(progress=self.progress.emit, **self.kwargs)
+            outputs, notes = self.run_func(progress=self.progress.emit, **self.kwargs)
             self.finished_ok.emit([str(p) for p in outputs], notes)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class DistanceRangeMapWorker(FaceSizeMapWorker):
+    """距離範囲マッピング（distance_range_map.run_distance_range_map）を別スレッドで実行する。"""
+    run_func = staticmethod(run_distance_range_map)

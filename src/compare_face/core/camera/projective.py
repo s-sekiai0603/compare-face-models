@@ -60,7 +60,7 @@ def _intersect(a1, a2, b1, b2) -> np.ndarray:
 def compute_projection(points, side_a: float, side_b: float, image_size: tuple[int, int],
                        focal_px: float | None = None, vertical=None) -> CameraProjection:
     """points: 画像座標 4 点（長方形を一周する順）。side_a = p0→p1 の長さ(m)、side_b = p1→p2 の長さ(m)。
-    image_size: (幅, 高さ)。主点を画像中心とみなす。focal_px を与えると焦点距離を推定せずその値を使う（実測距離による補正用）。
+    image_size: (幅, 高さ)。主点を画像中心とみなす。focal_px を与えると焦点距離を推定せずその値を使う（設置座標のドラッグ補正・垂直補正後・保存済みの設定の焦点距離用）。
     vertical: 鉛直（下向き）方向のカメラ座標ベクトル。与えると長方形の消失点から求めず、これをカメラ直下の方向とする
     （垂直補正後の画像用。(0, 1, 0) なら設置座標は画像の下方向の無限遠で camera_xy は None になる）。"""
     pts = np.asarray(points, dtype=np.float64).reshape(4, 2)
@@ -148,54 +148,51 @@ def clip_line_to_rect(p1, p2, width: float, height: float):
     return (x1 + t0 * dx, y1 + t0 * dy), (x1 + t1 * dx, y1 + t1 * dy)
 
 
-def calibrate_focal(points, side_a: float, side_b: float, image_size: tuple[int, int],
-                    ref_xy: tuple[float, float], measured_m: float) -> CameraProjection:
-    """カメラ直下の地面点から ref_xy までの実測距離 measured_m(m) に合うよう焦点距離を調整して算出し直す。
-    H は焦点距離に依らないので、変わるのはカメラ設置座標（と推定高さ）だけ。推定値に最も近い解を採用する。"""
-    if measured_m <= 0:
-        raise ProjectionError("実測距離は 0 より大きい値を指定してください。")
+NADIR_SCAN_STEPS = 120          # 焦点距離の粗い探索の分割数
+NADIR_SCAN_RANGE = (0.2, 5.0)   # 探索する焦点距離の範囲（4 点から推定した焦点距離に対する倍率）
+
+
+def focal_for_nadir(points, side_a: float, side_b: float, image_size: tuple[int, int],
+                    target_xy: tuple[float, float]) -> float:
+    """カメラ設置座標（カメラ直下が写る位置）を target_xy の近くへ動かすための焦点距離。
+    設置座標は焦点距離を変えると画像上の曲線（ほぼ縦方向）の上を動くので、target_xy をその曲線へ投影した（最も近い）点の焦点距離を返す。
+    4 点から推定した焦点距離を中心に NADIR_SCAN_RANGE 倍の範囲で探す。垂直補正後（設置座標が無限遠）には使えない。"""
     base = compute_projection(points, side_a, side_b, image_size)
+    tx, ty = float(target_xy[0]), float(target_xy[1])
 
-    def gap(f: float) -> float:
+    def cost(f: float) -> float:
         try:
-            return compute_projection(points, side_a, side_b, image_size, focal_px=f).distance_m(ref_xy) - measured_m
+            xy = compute_projection(points, side_a, side_b, image_size, focal_px=f).camera_xy
         except ProjectionError:
-            return float("nan")
+            return float("inf")
+        return float("inf") if xy is None else (xy[0] - tx) ** 2 + (xy[1] - ty) ** 2
 
-    fs = base.focal_px * np.geomspace(0.1, 10.0, 400)
-    gs = [gap(float(f)) for f in fs]
-    roots = []
-    for i in range(len(fs) - 1):
-        g0, g1 = gs[i], gs[i + 1]
-        if np.isnan(g0) or np.isnan(g1) or g0 * g1 > 0:
-            continue
-        lo, hi = float(fs[i]), float(fs[i + 1])
-        for _ in range(60):  # 二分法
-            mid = (lo + hi) / 2
-            gm = gap(mid)
-            if np.isnan(gm):
-                break
-            if gap(lo) * gm <= 0:
-                hi = mid
-            else:
-                lo = mid
-        roots.append((lo + hi) / 2)
-    if not roots:
-        raise ProjectionError("実測距離に合う焦点距離が見つかりません。補正点・実測距離・4 点を見直してください。")
-    f = min(roots, key=lambda r: abs(np.log(r / base.focal_px)))
-    return compute_projection(points, side_a, side_b, image_size, focal_px=f)
+    fs = base.focal_px * np.geomspace(NADIR_SCAN_RANGE[0], NADIR_SCAN_RANGE[1], NADIR_SCAN_STEPS)
+    costs = [cost(float(f)) for f in fs]
+    best = int(np.argmin(costs))
+    if not np.isfinite(costs[best]):
+        raise ProjectionError("カメラ設置座標を求められません。4 点の取り方を見直してください。")
+    lo, hi = float(fs[max(best - 1, 0)]), float(fs[min(best + 1, len(fs) - 1)])
+    phi = (np.sqrt(5.0) - 1.0) / 2.0
+    for _ in range(40):  # 黄金分割法
+        c, d = hi - phi * (hi - lo), lo + phi * (hi - lo)
+        if cost(c) < cost(d):
+            hi = d
+        else:
+            lo = c
+    return (lo + hi) / 2
 
 
 # ---- 設定ファイル（<画像名>.json） ----
 def save_config(path: Path, image_name: str, points, long_m: float, short_m: float, first_side: str,
                 camera_xy: tuple[float, float] | None, focal_px: float | None = None,
-                ref_xy: tuple[float, float] | None = None, measured_m: float | None = None,
                 distortion: dict | None = None, rectification: dict | None = None) -> None:
-    """focal_px / ref_xy / measured_m は実測距離で補正したときだけ記録する。
-    distortion = {"lambda", "scale", "lines"} はレンズ歪みを補正したときだけ記録する。補正したときは points / camera_xy / ref_xy は
+    """設定ファイルを書く。focal_px は、カメラ設置座標をドラッグして補正した（focal_for_nadir）ときだけ記録する（calibration.focal_px。
+    距離の算出は 4 点から推定する代わりにこの焦点距離を使う）。
+    distortion = {"lambda", "scale", "lines"} はレンズ歪みを補正したときだけ記録する。補正したときは points / camera_xy は
     「補正後の画像」の座標（元画像の点は distortion.py の変換で補正後の座標に直してから使う）。lines は元画像の座標。
     rectification = {"lines", "focal_px"} は垂直補正（vertical.py）をしたときだけ記録する。lines は垂直線（元画像の座標。
-    歪み補正後に垂直補正する）、focal_px は垂直補正に使った焦点距離。垂直補正したときは points / ref_xy は垂直補正後の画像の座標、
+    歪み補正後に垂直補正する）、focal_px は垂直補正に使った焦点距離。垂直補正したときは points は垂直補正後の画像の座標、
     camera_xy は無限遠なので null。"""
     data = {
         "image": image_name,
@@ -216,8 +213,7 @@ def save_config(path: Path, image_name: str, points, long_m: float, short_m: flo
             "lines": [[[float(x), float(y)] for x, y in line] for line in distortion["lines"]],
         }
     if focal_px is not None:
-        data["calibration"] = {"focal_px": float(focal_px), "ref_xy": [float(ref_xy[0]), float(ref_xy[1])],
-                               "measured_m": float(measured_m)}
+        data["calibration"] = {"focal_px": float(focal_px)}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -229,11 +225,10 @@ def load_config(path: Path) -> dict | None:
         pts = [(float(x), float(y)) for x, y in d["points"]]
         if len(pts) != 4 or d["first_side"] not in ("long", "short"):
             return None
-        cal = d.get("calibration")
+        cal = d.get("calibration")   # カメラ設置座標をドラッグして補正したときの焦点距離（古い版の実測補正で保存したものも同じ形）
         calibration = None
         if cal is not None:
-            calibration = {"focal_px": float(cal["focal_px"]), "ref_xy": tuple(float(v) for v in cal["ref_xy"]),
-                           "measured_m": float(cal["measured_m"])}
+            calibration = {"focal_px": float(cal["focal_px"])}
         dist = d.get("distortion")
         distortion = None
         if dist is not None:

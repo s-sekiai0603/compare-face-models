@@ -110,6 +110,9 @@ FACE_SIZE_MAP_DEFAULTS = {
     "gallery_dir": "",                                               # 比較対象フォルダ
     "camera_dir": str(PROJECT_ROOT / "debug" / "cam_pics" / "org"),  # カメラ画像フォルダ（ファイル名 = カメラID）
     "output_dir": str(PROJECT_ROOT / "debug" / "cam_pics" / "out"),  # 結果出力先フォルダ
+    "mode": "face_size",                                             # "face_size"（顔サイズマッピング）/ "distance_range"（距離範囲マッピング）
+    "config_dir": "",                                                # カメラ設定フォルダ（<カメラID>.json。距離範囲マッピング用）
+    "max_distance_m": 10.0,                                          # カメラからこの距離(m)以内を塗る（距離範囲マッピング用）
 }
 
 
@@ -137,6 +140,7 @@ DISTANCE_POSE_CHART_DEFAULTS = {
     "unit_m": 0.0,       # 距離の集計単位(m)。0 = 集計しない（画像 1 枚ずつプロット）
     "all_cameras": True,     # 出力対象: すべてのカメラを 1 チャートにプロット
     "per_camera": False,     # 出力対象: カメラIDごとに 1 チャートずつプロット
+    "excluded_cameras": [],  # カメラIDのリストで、チェックを外したカメラID（それ以外は対象）
 }
 
 

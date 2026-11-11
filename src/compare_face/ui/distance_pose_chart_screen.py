@@ -7,13 +7,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..core.common.settings import load_distance_pose_chart_settings, save_distance_pose_chart_settings
-from ..core.report.distance_pose_chart import CHART_SHEET_NAME, add_chart_sheet
+from ..core.report.distance_pose_chart import CHART_SHEET_NAME, add_chart_sheet, list_cameras
 from .widgets import add_path_row, fixed_label
 
 TITLE = "距離・向き・精度分析"
@@ -52,6 +53,22 @@ class DistancePoseChartScreen(QWidget):
         crow.addStretch()
         root.addLayout(crow)
 
+        camrow = QHBoxLayout()
+        camrow.addWidget(fixed_label("対象カメラ:"))
+        self.cam_list = QListWidget()
+        self.cam_list.setMaximumHeight(90)
+        self.cam_list.setToolTip("チャートに使うカメラID（チェックしたものだけ）。「すべてのカメラ」「カメラ個別」のどちらも、ここで選んだカメラの画像だけを対象にする")
+        camrow.addWidget(self.cam_list, 1)
+        side = QVBoxLayout()
+        self.btn_cam_all = QPushButton("全選択")
+        self.btn_cam_none = QPushButton("全解除")
+        side.addWidget(self.btn_cam_all)
+        side.addWidget(self.btn_cam_none)
+        side.addStretch()
+        camrow.addLayout(side)
+        root.addLayout(camrow)
+        self._load_cameras()
+
         self.cb_split = QCheckBox("顔の向きをチャートの左右に振り分け")
         self.cb_split.setChecked(self.settings["split_lr"] is True)
         self.cb_split.setToolTip(
@@ -89,6 +106,8 @@ class DistancePoseChartScreen(QWidget):
 
         self.btn_start.clicked.connect(self._on_start)
         self.btn_back.clicked.connect(self.back_requested.emit)
+        self.btn_cam_all.clicked.connect(lambda: self._set_all_cameras(True))
+        self.btn_cam_none.clicked.connect(lambda: self._set_all_cameras(False))
 
     def _pick(self) -> None:
         start = self.excel_edit.text() or ""
@@ -97,6 +116,40 @@ class DistancePoseChartScreen(QWidget):
             self.excel_edit.setText(path)
             self.settings["excel_path"] = path
             save_distance_pose_chart_settings(self.settings)
+            self._load_cameras()
+
+    def _load_cameras(self) -> None:
+        """指定した Excel に出てくるカメラIDをリストに並べる（前回チェックを外したカメラ以外はチェック済み）。"""
+        self.cam_list.clear()
+        path = self.excel_edit.text()
+        if not path or not Path(path).is_file():
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            cams = list_cameras(path)
+        except Exception as e:  # レイアウト違い等。チャート生成時に同じエラーが出るのでここでは空にするだけ
+            self.log.appendPlainText(f"カメラIDを読み取れませんでした: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        excluded = set(self.settings.get("excluded_cameras") or [])
+        for cam in cams:
+            item = QListWidgetItem(cam)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked if cam in excluded else Qt.Checked)
+            self.cam_list.addItem(item)
+
+    def _set_all_cameras(self, on: bool) -> None:
+        for k in range(self.cam_list.count()):
+            self.cam_list.item(k).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _camera_selection(self) -> tuple[list[str], list[str]]:
+        """(チェックしたカメラID, 外したカメラID)"""
+        on, off = [], []
+        for k in range(self.cam_list.count()):
+            it = self.cam_list.item(k)
+            (on if it.checkState() == Qt.Checked else off).append(it.text())
+        return on, off
 
     def _on_start(self) -> None:
         path = self.excel_edit.text()
@@ -110,16 +163,21 @@ class DistancePoseChartScreen(QWidget):
         if not all_cams and not each:
             QMessageBox.warning(self, TITLE, "出力対象（すべてのカメラ / カメラ個別）を 1 つ以上選んでください。")
             return
+        cams_on, cams_off = self._camera_selection()
+        if self.cam_list.count() and not cams_on:
+            QMessageBox.warning(self, TITLE, "対象カメラを 1 つ以上選んでください。")
+            return
         split = self.cb_split.isChecked()
         unit = round(self.unit_spin.value(), 1)
-        self.settings.update(excel_path=path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each)
+        self.settings.update(excel_path=path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each, excluded_cameras=cams_off)
         save_distance_pose_chart_settings(self.settings)
         self.log.clear()
         self.log.appendPlainText("チャートを生成しています...")
         self.btn_start.setEnabled(False)
         self.btn_back.setEnabled(False)
         try:
-            data = add_chart_sheet(path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each)
+            data = add_chart_sheet(path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each,
+                                  cameras=cams_on if self.cam_list.count() else None)
         except Exception as e:  # 入力 Excel の不備・書き込み失敗（Excel で開いている等）を画面に出す
             self.log.appendPlainText(f"失敗: {e}")
             QMessageBox.critical(self, TITLE, f"チャートを生成できませんでした:\n{e}")

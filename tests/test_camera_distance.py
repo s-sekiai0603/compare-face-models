@@ -113,3 +113,14 @@ def test_report_has_distance_row_and_column(tmp_path, monkeypatch):
     assert ws.cell(row=FIRST_ROW, column=10).value == lk.format("A16")
     with zipfile.ZipFile(out) as z:
         assert re.search(r"<f>VLOOKUP\(M4, 対象画像情報!\$B\$3:\$N\$200, 11, FALSE\)</f>", z.read("xl/worksheets/sheet2.xml").decode("utf-8"))
+
+
+def test_legacy_calibration_focal_is_still_used(tmp_path):
+    """廃止した実測補正で保存された設定（calibration.focal_px）も、距離の算出では従来どおり焦点距離として使う。"""
+    import json
+    d = _camera_dir(tmp_path)
+    plain = CameraDistance(d).distance_m("Cam1", [100, 200])
+    cfg = json.loads((d / "Cam1.json").read_text(encoding="utf-8"))
+    cfg["calibration"] = {"focal_px": 800.0, "ref_xy": [1.0, 2.0], "measured_m": 3.0}
+    (d / "Cam1.json").write_text(json.dumps(cfg), encoding="utf-8")
+    assert CameraDistance(d).distance_m("Cam1", [100, 200]) != pytest.approx(plain)

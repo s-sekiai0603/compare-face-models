@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.camera.projective import (
-    CameraProjection, ProjectionError, calibrate_focal, clip_line_to_rect, compute_projection, load_config, resolve_sides, save_config,
+    CameraProjection, ProjectionError, clip_line_to_rect, compute_projection, focal_for_nadir, load_config, resolve_sides, save_config,
 )
 from ..core.camera.distortion import MIN_LINE_POINTS, Distortion, estimate_lambda, lambda_range
 from ..core.camera.vertical import (
@@ -34,7 +34,6 @@ IMAGE_FILTER = "画像ファイル (*.png *.jpg *.jpeg *.bmp);;すべてのフ�
 POINT_COLOR = QColor(255, 200, 0)
 CAMERA_COLOR = QColor(255, 60, 60)
 SIM_COLOR = QColor(0, 220, 255)
-REF_COLOR = QColor(120, 255, 120)
 HORIZON_COLOR = QColor(255, 90, 255)
 DIST_COLOR = QColor(0, 255, 170)  # 歪み補正線
 MEMO_COLOR = QColor(255, 105, 180)  # 一時的なメモ線（保存しない）
@@ -74,6 +73,7 @@ class ImageView(QGraphicsView):
     """画像 + 4 点 + カメラ設置座標 + シミュレーション点を表示する。ホイールで拡大縮小、ドラッグで移動、クリックで座標通知。"""
     image_clicked = Signal(float, float)
     point_moved = Signal(int, float, float)  # ドラッグ中の 4 点（番号, 画像座標）
+    camera_moved = Signal(float, float)       # ドラッグ中のカメラ設置座標（画像座標。画像の外にもなり得る）
     vline_moved = Signal(int, int, float, float)  # ドラッグ中の垂直線の端点（線の番号, 0=始点/1=終点, 画像座標）
     memo_moved = Signal(int, int, float, float)  # ドラッグ中のメモ線の端点（線の番号, 0=始点/1=終点, 画像座標）
 
@@ -89,7 +89,6 @@ class ImageView(QGraphicsView):
         self._points: list[tuple[float, float]] = []
         self._camera: tuple[float, float] | None = None
         self._sim: tuple[tuple[float, float], str] | None = None
-        self._ref: tuple[float, float] | None = None
         self._horizon = None  # 画像内に切り取った地平線の線分 ((x, y), (x, y))
         self._vanishing = None  # 消失点 ((x, y), (x, y))（補線は _points の辺から作る）
         self._dist_lines: list[list[tuple[float, float]]] = []  # 歪み補正線（表示中の画像の座標）
@@ -101,16 +100,18 @@ class ImageView(QGraphicsView):
         self._press_pos = None
         self._dragged = False
         self._drag_idx: int | None = None
+        self._drag_camera = False
         self._drag_memo: tuple[int, int] | None = None
         self._drag_vline: tuple[int, int] | None = None
         self.vline_drag_enabled = True  # 垂直補正の適用中・他の指定モード中は垂直線の端点を動かさない
-        self.memo_drag_enabled = True  # 距離シミュレーション・補正点指定・歪み補正線指定中はメモ線の端点を動かさない
-        self.point_drag_enabled = True  # 距離シミュレーション・補正点指定中は点を動かさない
+        self.memo_drag_enabled = True  # 距離シミュレーション・歪み補正線指定中はメモ線の端点を動かさない
+        self.point_drag_enabled = True  # 距離シミュレーション中は点を動かさない
+        self.camera_drag_enabled = True  # カメラ設置座標のドラッグ補正（垂直補正後・点の指定中などは不可）
         self.viewport().setMouseTracking(True)
 
     # ---- 表示内容 ----
     def set_image(self, image: QImage | None) -> None:
-        self._points, self._camera, self._sim, self._ref = [], None, None, None
+        self._points, self._camera, self._sim = [], None, None
         self._horizon, self._vanishing = None, None
         self._dist_lines = []
         self._memo_lines, self._memo_pending = [], None
@@ -179,10 +180,6 @@ class ImageView(QGraphicsView):
     def set_vlines(self, lines, pending=None) -> None:
         self._vlines = [(tuple(a), tuple(b)) for a, b in lines]
         self._vpending = pending
-        self._rebuild()
-
-    def set_ref(self, xy: tuple[float, float] | None) -> None:
-        self._ref = xy
         self._rebuild()
 
     def _rebuild(self, image: QImage | None = None) -> None:
@@ -264,8 +261,6 @@ class ImageView(QGraphicsView):
             s.addItem(item)
         if self._memo_pending is not None:
             _marker(s, QPointF(*self._memo_pending), MEMO_COLOR, 3)
-        if self._ref is not None:
-            _marker(s, QPointF(*self._ref), REF_COLOR, 5, " 補正点")
         if self._sim is not None:  # クリックした点と距離のラベルは常に描く（カメラ設置座標が無限遠の垂直補正後でも）
             (x, y), text = self._sim
             if self._camera is not None:
@@ -330,6 +325,13 @@ class ImageView(QGraphicsView):
                 best, best_d = i, d
         return best
 
+    def _camera_at(self, pos) -> bool:
+        """画面上の座標 pos がカメラ設置座標の点の近くか。"""
+        if self._camera is None:
+            return False
+        q = self.mapFromScene(QPointF(*self._camera))
+        return ((q.x() - pos.x()) ** 2 + (q.y() - pos.y()) ** 2) ** 0.5 <= POINT_HIT_PX
+
     def _vline_end_at(self, pos) -> tuple[int, int] | None:
         """画面上の座標 pos の近くにある垂直線の端点（線の番号, 0=始点/1=終点）。"""
         best, best_d = None, POINT_HIT_PX
@@ -360,6 +362,10 @@ class ImageView(QGraphicsView):
             if self._drag_idx is not None:
                 event.accept()
                 return
+        if event.button() == Qt.LeftButton and self.camera_drag_enabled and self._camera_at(event.position()):
+            self._drag_camera = True
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self.vline_drag_enabled:
             self._drag_vline = self._vline_end_at(event.position())
             if self._drag_vline is not None:
@@ -373,6 +379,11 @@ class ImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._drag_camera:
+            p = self.mapToScene(event.position().toPoint())
+            self.camera_moved.emit(p.x(), p.y())
+            event.accept()
+            return
         if self._drag_vline is not None:
             p = self.mapToScene(event.position().toPoint())
             x = min(max(p.x(), self._image_rect.left()), self._image_rect.right())
@@ -396,6 +407,7 @@ class ImageView(QGraphicsView):
             return
         if event.buttons() == Qt.NoButton:
             hover = ((self.point_drag_enabled and self._point_at(event.position()) is not None)
+                     or (self.camera_drag_enabled and self._camera_at(event.position()))
                      or (self.memo_drag_enabled and self._memo_end_at(event.position()) is not None)
                      or (self.vline_drag_enabled and self._vline_end_at(event.position()) is not None))
             self.viewport().setCursor(Qt.SizeAllCursor if hover else Qt.ArrowCursor)
@@ -409,6 +421,11 @@ class ImageView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._drag_camera:
+            self._drag_camera = False
+            self._press_pos = None
+            event.accept()
+            return
         if self._drag_vline is not None:
             self._drag_vline = None
             self._press_pos = None
@@ -441,15 +458,14 @@ class CameraProjectionScreen(QWidget):
         super().__init__()
         self.settings = load_camera_projection_settings()
         self.points: list[tuple[float, float]] = []
+        self.focal_override: float | None = None         # カメラ設置座標のドラッグで補正した焦点距離（None = 4 点から自動推定）
         self.projection: CameraProjection | None = None
         self.image_size: tuple[int, int] | None = None
-        self.ref_xy: tuple[float, float] | None = None   # 実測距離で補正する点
         self.orig_img = None                             # 元画像（BGR）
         self.dist: Distortion | None = None              # レンズ歪みの補正（4 点などは補正後の画像の座標で持つ）
         self.dist_lines: list[list[tuple[float, float]]] = []  # 歪み補正線（元画像の座標）
         self.memo_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []  # メモ線（元画像の座標・保存しない）
         self.memo_pending: tuple[float, float] | None = None
-        self.focal_override: float | None = None         # 補正後の焦点距離（None = 自動推定）
         self.rect: VerticalRectification | None = None  # 垂直補正（歪み補正の後。4 点などは垂直補正後の画像の座標で持つ）
         self.vlines: list[tuple[tuple[float, float], tuple[float, float]]] = []  # 建物の垂直線（元画像の座標）
         self.vpending: tuple[float, float] | None = None
@@ -549,20 +565,11 @@ class CameraProjectionScreen(QWidget):
         root.addWidget(self.dist_label)
 
         crow = QHBoxLayout()
-        self.btn_ref = QPushButton("補正点を指定")
-        self.btn_ref.setCheckable(True)
-        self.ref_label = QLabel("")
-        self.measured_spin = self._side_spin()
-        self.btn_calibrate = QPushButton("実測距離で補正")
-        self.btn_reset_cal = QPushButton("補正解除")
-        crow.addWidget(QLabel("実測補正:"))
-        crow.addWidget(self.btn_ref)
-        crow.addWidget(self.ref_label)
-        crow.addWidget(QLabel("カメラ直下からの実測距離（地面上）"))
-        crow.addWidget(self.measured_spin)
-        crow.addWidget(self.btn_calibrate)
-        crow.addWidget(self.btn_reset_cal)
-        crow.addStretch()
+        self.cam_label = QLabel("")
+        self.btn_reset_cam = QPushButton("カメラ位置補正解除")
+        crow.addWidget(QLabel("カメラ位置補正:"))
+        crow.addWidget(self.cam_label, 1)
+        crow.addWidget(self.btn_reset_cam)
         root.addLayout(crow)
 
         self.points_label = QLabel("")
@@ -584,6 +591,7 @@ class CameraProjectionScreen(QWidget):
 
         self.view.image_clicked.connect(self._on_image_clicked)
         self.view.point_moved.connect(self._on_point_moved)
+        self.view.camera_moved.connect(self._on_camera_moved)
         self.view.memo_moved.connect(self._on_memo_moved)
         self.view.vline_moved.connect(self._on_vline_moved)
         self.long_spin.valueChanged.connect(self._invalidate)
@@ -606,7 +614,6 @@ class CameraProjectionScreen(QWidget):
         self.chk_antialias.toggled.connect(self._save_screen_settings)
         self.btn_calc.clicked.connect(self._on_calc)
         self.btn_sim.toggled.connect(self._on_sim_toggled)
-        self.btn_ref.toggled.connect(self._on_ref_toggled)
         self.btn_dline.toggled.connect(self._on_dline_toggled)
         self.btn_memo.toggled.connect(self._on_memo_toggled)
         self.btn_vline.toggled.connect(self._on_vline_toggled)
@@ -622,9 +629,7 @@ class CameraProjectionScreen(QWidget):
         self.btn_estimate.clicked.connect(self._on_estimate_distortion)
         self.lambda_spin.valueChanged.connect(self._on_lambda_changed)
         self.btn_reset_dist.clicked.connect(lambda: self._set_lambda(0.0))
-        self.measured_spin.valueChanged.connect(self._refresh_state)
-        self.btn_calibrate.clicked.connect(self._on_calibrate)
-        self.btn_reset_cal.clicked.connect(self._on_reset_calibration)
+        self.btn_reset_cam.clicked.connect(self._on_reset_camera)
         self.btn_save.clicked.connect(self._on_save)
         self.btn_back.clicked.connect(self.back_requested.emit)
 
@@ -680,10 +685,8 @@ class CameraProjectionScreen(QWidget):
         self.btn_dline.setChecked(False)
         self.points = []
         self.projection = None
-        self.ref_xy = None
         self.focal_override = None
         self.btn_sim.setChecked(False)
-        self.btn_ref.setChecked(False)
         self.btn_memo.setChecked(False)
         self.btn_vline.setChecked(False)
         self.memo_lines, self.memo_pending = [], None
@@ -739,13 +742,7 @@ class CameraProjectionScreen(QWidget):
         self.first_combo.blockSignals(False)
         self.view.set_points(self.points)
         cal = cfg["calibration"]
-        self.focal_override = cal["focal_px"] if cal else None
-        self.ref_xy = cal["ref_xy"] if cal else None
-        self.view.set_ref(self.ref_xy)
-        if cal:
-            self.measured_spin.blockSignals(True)
-            self.measured_spin.setValue(cal["measured_m"])
-            self.measured_spin.blockSignals(False)
+        self.focal_override = cal["focal_px"] if cal else None   # カメラ設置座標をドラッグして補正した焦点距離
         self._compute(notify=False)
         self.status.setText(f"前回の設定を読み込みました: {path.name}\n{self.status.text()}")
         self._refresh_state()
@@ -779,13 +776,6 @@ class CameraProjectionScreen(QWidget):
                     self.dist_lines.append([])
                 self.dist_lines[-1].append(self._from_view((x, y)))
                 self._refresh_dist_lines()
-                self._refresh_state()
-            return
-        if self.btn_ref.isChecked():
-            if self.view.image_contains(x, y):
-                self.ref_xy = (x, y)
-                self.view.set_ref(self.ref_xy)
-                self.btn_ref.setChecked(False)
                 self._refresh_state()
             return
         if self.btn_sim.isChecked() and self.projection is not None:
@@ -830,7 +820,7 @@ class CameraProjectionScreen(QWidget):
                 and self.short_spin.value() > 0 and self.long_spin.value() >= self.short_spin.value())
 
     def _invalidate(self, *_args) -> None:
-        """入力が変わったら算出結果を捨てる。"""
+        """入力が変わったら算出結果（と、カメラ設置座標のドラッグ補正）を捨てる。"""
         self.projection = None
         self.focal_override = None
         self.btn_sim.setChecked(False)
@@ -845,14 +835,17 @@ class CameraProjectionScreen(QWidget):
         self.btn_calc.setEnabled(self._inputs_ready())
         self.btn_sim.setEnabled(self.projection is not None)
         self.btn_save.setEnabled(self.projection is not None)
-        self.btn_ref.setEnabled(self.image_size is not None)
-        self.ref_label.setText(f"({self.ref_xy[0]:.0f}, {self.ref_xy[1]:.0f})" if self.ref_xy else "未指定")
-        self.btn_calibrate.setEnabled(self._inputs_ready() and self.ref_xy is not None and self.measured_spin.value() > 0)
-        self.btn_reset_cal.setEnabled(self.focal_override is not None)
         rect_on = self.rect is not None
-        self._update_cursor()  # 垂直補正の適用有無で垂直線の端点のドラッグ可否が変わる
         if rect_on:
-            self.btn_calibrate.setEnabled(False)  # 垂直補正後の距離は焦点距離に依らない（H だけで決まる）
+            self.cam_label.setText("垂直補正後は使えません（距離は焦点距離に依らない）")
+        elif self.projection is None:
+            self.cam_label.setText("「カメラ位置算出」のあと、画像上のカメラ設置座標の点（緑の丸）をドラッグして動かせます")
+        elif self.focal_override is not None:
+            self.cam_label.setText(f"補正中（ドラッグで決めた焦点距離 {self.focal_override:.0f} px）")
+        else:
+            self.cam_label.setText("補正なし（4 点から推定した焦点距離）。設置座標の点をドラッグすると補正します")
+        self.btn_reset_cam.setEnabled(self.focal_override is not None and not rect_on)
+        self._update_cursor()  # 垂直補正の適用有無で垂直線の端点のドラッグ可否が変わる
         has_v = bool(self.vlines) or self.vpending is not None
         self.btn_vline.setEnabled(self.dist is not None and not rect_on)
         self.btn_undo_vline.setEnabled(has_v and not rect_on)
@@ -885,12 +878,12 @@ class CameraProjectionScreen(QWidget):
         self._compute(notify=True)
         self._refresh_state()
 
-    def _compute(self, notify: bool) -> None:
+    def _compute(self, notify: bool, fit: bool = True) -> None:
         if not self._inputs_ready():
             return
         side_a, side_b = self._sides()
         try:
-            focal = self.focal_override or (self.rect.focal_px if self.rect is not None else None)
+            focal = self.rect.focal_px if self.rect is not None else self.focal_override
             proj = compute_projection(self.points, side_a, side_b, self.image_size, focal_px=focal,
                                       vertical=self.rect.vertical if self.rect is not None else None)
         except ProjectionError as e:
@@ -903,7 +896,8 @@ class CameraProjectionScreen(QWidget):
         self.projection = proj
         self._update_guides()
         self.view.set_camera(proj.camera_xy)
-        self.view.fit_all()
+        if fit:
+            self.view.fit_all()
         if proj.camera_xy is None:
             gx, gy = proj.camera_ground
             head = f"カメラ設置座標: 画像の下方向の無限遠（垂直補正済み。カメラ直下の地面座標 ({gx:.2f}, {gy:.2f}) m）"
@@ -912,10 +906,32 @@ class CameraProjectionScreen(QWidget):
             w, h = self.image_size
             where = "（画像の外）" if not (0 <= cx < w and 0 <= cy < h) else ""
             head = f"カメラ設置座標: ({cx:.0f}, {cy:.0f}) px{where}"
-        kind = "垂直補正後の" if self.rect is not None else ("補正後" if self.focal_override else "推定")
+        kind = "垂直補正後の" if self.rect is not None else ("ドラッグで補正した" if self.focal_override is not None else "推定")
         self.status.setText(
             f"{head} / 推定カメラ高さ: {proj.height_m:.2f} m / {kind}焦点距離: {proj.focal_px:.0f} px"
             "\n「距離シミュレーション」を押して画像をクリックすると、カメラ設置地点からの距離を表示します。")
+
+    def _on_camera_moved(self, x: float, y: float) -> None:
+        """ドラッグ中のカメラ設置座標。焦点距離を変えると設置座標は画像上の曲線の上を動くので、ドラッグ位置をその曲線へ投影した点の焦点距離を採用して
+        算出し直す（推定カメラ高さ・距離は焦点距離から一貫して決まる）。"""
+        if self.rect is not None or not self._inputs_ready() or self.projection is None:
+            return
+        side_a, side_b = self._sides()
+        try:
+            self.focal_override = focal_for_nadir(self.points, side_a, side_b, self.image_size, (x, y))
+        except ProjectionError:
+            return
+        self.btn_sim.setChecked(False)
+        self.view.set_sim(None)
+        self._compute(notify=False, fit=False)   # ドラッグ中は表示範囲を動かさない
+        self._refresh_state()
+
+    def _on_reset_camera(self) -> None:
+        self.focal_override = None
+        self.btn_sim.setChecked(False)
+        self.view.set_sim(None)
+        self._compute(notify=False)
+        self._refresh_state()
 
     def _update_guides(self, *_args) -> None:
         """チェックが入っていて算出済みなら、消失点 2 つ・その補線（長方形の辺の延長）・地平線（2 つの消失点を結ぶ直線）を描く。"""
@@ -929,7 +945,6 @@ class CameraProjectionScreen(QWidget):
         if on:
             self.btn_vline.setChecked(False)
             self.btn_memo.setChecked(False)
-            self.btn_ref.setChecked(False)
             self.btn_dline.setChecked(False)
         self._update_cursor()
         if not on:
@@ -940,52 +955,17 @@ class CameraProjectionScreen(QWidget):
             self.btn_vline.setChecked(False)
             self.btn_memo.setChecked(False)
             self.btn_sim.setChecked(False)
-            self.btn_ref.setChecked(False)
-        self._update_cursor()
-
-    def _on_ref_toggled(self, on: bool) -> None:
-        if on:
-            self.btn_vline.setChecked(False)
-            self.btn_memo.setChecked(False)
-            self.btn_sim.setChecked(False)
-            self.btn_dline.setChecked(False)
         self._update_cursor()
 
     def _update_cursor(self) -> None:
-        placing = (self.btn_sim.isChecked() or self.btn_ref.isChecked() or self.btn_dline.isChecked()
+        placing = (self.btn_sim.isChecked() or self.btn_dline.isChecked()
                    or self.btn_vline.isChecked())
         crosshair = placing or self.btn_memo.isChecked()
         self.view.point_drag_enabled = not crosshair
+        self.view.camera_drag_enabled = not crosshair and self.rect is None
         self.view.memo_drag_enabled = not placing
         self.view.vline_drag_enabled = not (placing and not self.btn_vline.isChecked()) and self.rect is None
         self.view.setCursor(Qt.CrossCursor if crosshair else Qt.ArrowCursor)
-
-    def _on_calibrate(self) -> None:
-        """補正点までの実測距離（カメラ直下から）に合うよう焦点距離を調整し、カメラ設置座標を求め直す。"""
-        if self.rect is not None:
-            QMessageBox.information(self, "射影変換設定抽出", "垂直補正後は距離が焦点距離に依らないため、実測距離による補正は使えません。"
-                                    "使うときは「垂直補正解除」を押してください。")
-            return
-        side_a, side_b = self._sides()
-        try:
-            proj = calibrate_focal(self.points, side_a, side_b, self.image_size, self.ref_xy, self.measured_spin.value())
-        except ProjectionError as e:
-            self.status.setText(f"補正できませんでした: {e}")
-            QMessageBox.warning(self, "射影変換設定抽出", str(e))
-            return
-        self.focal_override = proj.focal_px
-        self.btn_sim.setChecked(False)
-        self.view.set_sim(None)
-        self._compute(notify=False)
-        self.status.setText("実測距離で補正しました。\n" + self.status.text())
-        self._refresh_state()
-
-    def _on_reset_calibration(self) -> None:
-        self.focal_override = None
-        self.btn_sim.setChecked(False)
-        self.view.set_sim(None)
-        self._compute(notify=False)
-        self._refresh_state()
 
     # ---- メモ線（一時的。保存しない。座標は元画像で持ち、歪み係数を変えても同じ位置に付く） ----
     def _refresh_memo(self) -> None:
@@ -999,7 +979,6 @@ class CameraProjectionScreen(QWidget):
         if on:
             self.btn_vline.setChecked(False)
             self.btn_sim.setChecked(False)
-            self.btn_ref.setChecked(False)
             self.btn_dline.setChecked(False)
         else:
             self.memo_pending = None  # 始点だけの状態は破棄
@@ -1070,23 +1049,19 @@ class CameraProjectionScreen(QWidget):
         self._set_lambda(value)
 
     def _set_lambda(self, lam: float) -> None:
-        """歪み係数を変えて補正後の画像に切り替える。指定済みの 4 点・補正点は元画像の位置を保ったまま付け替え、算出結果は破棄する。"""
+        """歪み係数を変えて補正後の画像に切り替える。指定済みの 4 点は元画像の位置を保ったまま付け替え、算出結果は破棄する。"""
         if self.orig_img is None or self.dist is None:
             return
         orig_points = [self._from_view(p) for p in self.points]
-        orig_ref = self._from_view(self.ref_xy) if self.ref_xy is not None else None
         had_rect = self.rect is not None
         self.rect = None  # 垂直補正は歪み補正後の画像から求めたものなので、歪み係数を変えたら解除する（垂直線は残す）
         new = Distortion(lam, self.image_size)
         self.dist = new
         self.points = [self._to_view(p) for p in orig_points]
-        if orig_ref is not None:
-            self.ref_xy = self._to_view(orig_ref)
         self._set_lambda_spin(new.lam)
         self._show_working_image()
         self._invalidate()
         self.view.set_points(self.points)
-        self.view.set_ref(self.ref_xy)
         self._refresh_dist_lines()
         self._refresh_memo()
         self._refresh_vlines()
@@ -1103,7 +1078,7 @@ class CameraProjectionScreen(QWidget):
 
     def _on_vline_toggled(self, on: bool) -> None:
         if on:
-            for b in (self.btn_sim, self.btn_ref, self.btn_dline, self.btn_memo):
+            for b in (self.btn_sim, self.btn_dline, self.btn_memo):
                 b.setChecked(False)
         else:
             self.vpending = None  # 始点だけの状態は破棄
@@ -1138,19 +1113,15 @@ class CameraProjectionScreen(QWidget):
         return VerticalRectification(vertical_vanishing_point(lens, self.image_size), focal_px, self.image_size)
 
     def _set_rect(self, rect: VerticalRectification | None) -> None:
-        """垂直補正を切り替える。4 点・補正点は元画像の位置を保ったまま付け替え、算出結果は破棄する。"""
+        """垂直補正を切り替える。4 点は元画像の位置を保ったまま付け替え、算出結果は破棄する。"""
         orig_points = [self._from_view(p) for p in self.points]
-        orig_ref = self._from_view(self.ref_xy) if self.ref_xy is not None else None
         self.rect = rect
         self.points = [self._to_view(p) for p in orig_points]
-        if orig_ref is not None:
-            self.ref_xy = self._to_view(orig_ref)
         self.btn_vline.setChecked(False)
         self._update_cursor()
         self._show_working_image()
         self._invalidate()  # 算出結果・焦点距離の補正・シミュレーションを捨てる
         self.view.set_points(self.points)
-        self.view.set_ref(self.ref_xy)
         self._refresh_dist_lines()
         self._refresh_memo()
         self._refresh_vlines()
@@ -1224,8 +1195,8 @@ class CameraProjectionScreen(QWidget):
             return
         try:
             extra = {}
-            if self.focal_override:
-                extra.update(focal_px=self.focal_override, ref_xy=self.ref_xy, measured_m=self.measured_spin.value())
+            if self.focal_override is not None and self.rect is None:
+                extra["focal_px"] = self.focal_override
             if self.dist is not None and not self.dist.is_identity:
                 extra["distortion"] = {"lambda": self.dist.lam, "scale": self.dist.scale,
                                        "lines": [line for line in self.dist_lines if line]}
