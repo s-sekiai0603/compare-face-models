@@ -8,13 +8,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
     QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..core.common.settings import load_distance_pose_chart_settings, save_distance_pose_chart_settings
-from ..core.report.distance_pose_chart import CHART_SHEET_NAME, add_chart_sheet, list_cameras
+from ..core.report.distance_pose_chart import (
+    CHART_SHEET_NAME, COLOR_GROUPS, ICON_DIR, add_chart_sheet, color_group_rgb, icon_choices, list_cameras,
+)
 from .widgets import add_path_row, fixed_label
 
 TITLE = "距離・向き・精度分析"
@@ -69,6 +72,16 @@ class DistancePoseChartScreen(QWidget):
         root.addLayout(camrow)
         self._load_cameras()
 
+        # 出力対象の色（誤識別数の 7 段階）・アイコン（顔の向きの 15 組合せ）: 複数選択、全選択・全解除
+        excluded_colors = set(self.settings.get("excluded_colors") or [])
+        excluded_icons = set(self.settings.get("excluded_icons") or [])
+        self.color_list = self._make_list(
+            "対象の色:", "チャートに出す色（誤識別数の段階）。チェックを外した色のアイコンはプロットしない", 130,
+            [(label, g, self._swatch(color_group_rgb(g)), g not in excluded_colors) for g, (label, _, _) in enumerate(COLOR_GROUPS)], root)
+        self.icon_list = self._make_list(
+            "対象のアイコン:", "チャートに出すアイコン（顔の向きの組合せ: 縦 × 横）。チェックを外したアイコンはプロットしない", 130,
+            [(label, fname, self._icon(fname), fname not in excluded_icons) for label, fname in icon_choices()], root)
+
         self.cb_split = QCheckBox("顔の向きをチャートの左右に振り分け")
         self.cb_split.setChecked(self.settings["split_lr"] is True)
         self.cb_split.setToolTip(
@@ -117,6 +130,55 @@ class DistancePoseChartScreen(QWidget):
             self.settings["excel_path"] = path
             save_distance_pose_chart_settings(self.settings)
             self._load_cameras()
+
+    @staticmethod
+    def _swatch(rgb) -> QIcon:
+        pm = QPixmap(20, 20)
+        pm.fill(QColor(*rgb))
+        return QIcon(pm)
+
+    @staticmethod
+    def _icon(fname: str) -> QIcon:
+        return QIcon(str(ICON_DIR / fname))
+
+    def _make_list(self, label: str, tip: str, height: int, items: list, root: QVBoxLayout) -> QListWidget:
+        """チェック付きの一覧 + 全選択・全解除ボタンの行を root に足す。items = [(表示名, 値, アイコン, チェック済みか)]。"""
+        row = QHBoxLayout()
+        row.addWidget(fixed_label(label))
+        lw = QListWidget()
+        lw.setMaximumHeight(height)
+        lw.setToolTip(tip)
+        for text, value, ico, on in items:
+            it = QListWidgetItem(ico, text)
+            it.setData(Qt.UserRole, value)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if on else Qt.Unchecked)
+            lw.addItem(it)
+        row.addWidget(lw, 1)
+        side = QVBoxLayout()
+        b_all, b_none = QPushButton("全選択"), QPushButton("全解除")
+        b_all.clicked.connect(lambda: self._set_all(lw, True))
+        b_none.clicked.connect(lambda: self._set_all(lw, False))
+        side.addWidget(b_all)
+        side.addWidget(b_none)
+        side.addStretch()
+        row.addLayout(side)
+        root.addLayout(row)
+        return lw
+
+    @staticmethod
+    def _set_all(lw: QListWidget, on: bool) -> None:
+        for k in range(lw.count()):
+            lw.item(k).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    @staticmethod
+    def _checked(lw: QListWidget) -> tuple[list, list]:
+        """(チェックした値, 外した値)"""
+        on, off = [], []
+        for k in range(lw.count()):
+            it = lw.item(k)
+            (on if it.checkState() == Qt.Checked else off).append(it.data(Qt.UserRole))
+        return on, off
 
     def _load_cameras(self) -> None:
         """指定した Excel に出てくるカメラIDをリストに並べる（前回チェックを外したカメラ以外はチェック済み）。"""
@@ -167,9 +229,18 @@ class DistancePoseChartScreen(QWidget):
         if self.cam_list.count() and not cams_on:
             QMessageBox.warning(self, TITLE, "対象カメラを 1 つ以上選んでください。")
             return
+        colors_on, colors_off = self._checked(self.color_list)
+        icons_on, icons_off = self._checked(self.icon_list)
+        if not colors_on:
+            QMessageBox.warning(self, TITLE, "対象の色を 1 つ以上選んでください。")
+            return
+        if not icons_on:
+            QMessageBox.warning(self, TITLE, "対象のアイコンを 1 つ以上選んでください。")
+            return
         split = self.cb_split.isChecked()
         unit = round(self.unit_spin.value(), 1)
-        self.settings.update(excel_path=path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each, excluded_cameras=cams_off)
+        self.settings.update(excel_path=path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each, excluded_cameras=cams_off,
+                             excluded_colors=colors_off, excluded_icons=icons_off)
         save_distance_pose_chart_settings(self.settings)
         self.log.clear()
         self.log.appendPlainText("チャートを生成しています...")
@@ -177,7 +248,8 @@ class DistancePoseChartScreen(QWidget):
         self.btn_back.setEnabled(False)
         try:
             data = add_chart_sheet(path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each,
-                                  cameras=cams_on if self.cam_list.count() else None)
+                                  cameras=cams_on if self.cam_list.count() else None,
+                                  colors=None if not colors_off else colors_on, icon_files=None if not icons_off else icons_on)
         except Exception as e:  # 入力 Excel の不備・書き込み失敗（Excel で開いている等）を画面に出す
             self.log.appendPlainText(f"失敗: {e}")
             QMessageBox.critical(self, TITLE, f"チャートを生成できませんでした:\n{e}")

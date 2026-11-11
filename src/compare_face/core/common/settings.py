@@ -140,6 +140,8 @@ DISTANCE_POSE_CHART_DEFAULTS = {
     "unit_m": 0.0,       # 距離の集計単位(m)。0 = 集計しない（画像 1 枚ずつプロット）
     "all_cameras": True,     # 出力対象: すべてのカメラを 1 チャートにプロット
     "per_camera": False,     # 出力対象: カメラIDごとに 1 チャートずつプロット
+    "excluded_colors": [],   # 出力対象から外した色の段階の番号（distance_pose_chart.COLOR_GROUPS。それ以外は対象）
+    "excluded_icons": [],    # 出力対象から外したアイコンのファイル名（それ以外は対象）
     "excluded_cameras": [],  # カメラIDのリストで、チェックを外したカメラID（それ以外は対象）
 }
 

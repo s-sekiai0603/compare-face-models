@@ -32,7 +32,8 @@ from openpyxl.drawing.xdr import XDRPoint2D, XDRPositiveSize2D
 
 from ..common.settings import PROJECT_ROOT
 from .verify_face_size_excel import (
-    _COUNT_LEGEND, FIRST_COL, FIRST_ROW, INFO_FIRST_ROW, INFO_SHEET_NAME, MISIDENTIFY_SHEET_NAME, count_bin, count_bin_label,
+    _COUNT_LEGEND, MAX_COUNT_BIN, FIRST_COL, FIRST_ROW, INFO_FIRST_ROW, INFO_SHEET_NAME, MAX_COUNT_BIN, MISIDENTIFY_SHEET_NAME, count_bin,
+    count_bin_label,
     count_fill)
 
 CHART_SHEET_NAME = "距離向き精度分析チャート"
@@ -53,6 +54,59 @@ _ICON_TABLE = {
     (R_DIAG, R_DIAG): "r_diagonal_r_diagonal",
 }
 ICON_FILES = {frozenset(k): f"{v}.png" for k, v in _ICON_TABLE.items()}
+
+
+# 色の凡例の 7 段階（ラベル, 段階の下限, 上限）。段階 = verify_face_size_excel.count_bin（0〜MAX_COUNT_BIN）。出力対象の色の選択はこの 7 つで行う
+COLOR_GROUPS = (
+    ("0 件", 0, 0), ("1〜10 件", 1, 1), ("11〜20 件", 2, 2), ("21〜50 件", 3, 3), ("51〜100 件", 4, 4),
+    ("101〜450 件", 5, MAX_COUNT_BIN - 1), (f"{101 + (MAX_COUNT_BIN - 5) * 50} 件以上", MAX_COUNT_BIN, MAX_COUNT_BIN),
+)
+
+
+def _hex_rgb(s: str) -> tuple[int, int, int]:
+    s = s.lstrip("#")[-6:]
+    return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+
+
+def _bin_rep_count(b: int) -> int:
+    """段階 b の代表件数。"""
+    return (0, 1, 11, 21, 51)[b] if b <= 4 else 101 + (b - 5) * 50
+
+
+_GROUP_OF_RGB: dict[tuple[int, int, int], int] = {}
+
+
+def color_group_rgb(g: int) -> tuple[int, int, int]:
+    """色の段階 g（COLOR_GROUPS の番号）の代表色（凡例の色見本）。"""
+    return _hex_rgb(count_fill(_bin_rep_count(COLOR_GROUPS[g][1])).fgColor.rgb)
+
+
+def color_group(rgb: tuple[int, int, int]) -> int | None:
+    """誤識別数のセルの色 rgb がどの色の段階（COLOR_GROUPS の番号）か。段階の色でなければ None。"""
+    if not _GROUP_OF_RGB:
+        for b in range(MAX_COUNT_BIN + 1):
+            g = next(k for k, (_, lo, hi) in enumerate(COLOR_GROUPS) if lo <= b <= hi)
+            _GROUP_OF_RGB[_hex_rgb(count_fill(_bin_rep_count(b)).fgColor.rgb)] = g
+    return _GROUP_OF_RGB.get(tuple(rgb))
+
+
+def icon_choices() -> list[tuple[str, str]]:
+    """出力対象に選べるアイコン [(ラベル「正面 × 左横」, ファイル名)]（15 個）。"""
+    return [(f"{a} × {b}", f"{name}.png") for (a, b), name in _ICON_TABLE.items()]
+
+
+def filter_points(points: list["ChartPoint"], colors: Collection[int] | None = None, icons: Collection[str] | None = None) -> list["ChartPoint"]:
+    """出力対象の色の段階（colors）・アイコン（icons）に当てはまる点だけにする。None = 絞り込まない。段階に当てはまらない色の点は色では除かない。"""
+    out = []
+    for p in points:
+        if icons is not None and p.icon not in icons:
+            continue
+        if colors is not None:
+            g = color_group(p.rgb)
+            if g is not None and g not in colors:
+                continue
+        out.append(p)
+    return out
 
 
 def icon_file(a: str, b: str) -> str | None:
@@ -389,9 +443,9 @@ def _build_sheet_workbook(data: ChartData, path: Path, icon_dir: Path, split_lr:
 
 # ---- 凡例（チャートの右の余白）----
 def legend_items() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """(色の凡例 [(ラベル, 色 RRGGBB)], 顔の向きの凡例 [(ラベル, アイコンのファイル名)])。"""
-    colors = [(count_bin_label(count_bin(n)), count_fill(n).fgColor.rgb[-6:]) for n in _COUNT_LEGEND]
-    dirs = [(f"{a} × {b}", f"{name}.png") for (a, b), name in _ICON_TABLE.items()]
+    """(色の凡例 [(ラベル, 色 RRGGBB)]（COLOR_GROUPS の 7 段階）, 顔の向きの凡例 [(ラベル, アイコンのファイル名)])。"""
+    colors = [(label, "%02X%02X%02X" % color_group_rgb(g)) for g, (label, _, _) in enumerate(COLOR_GROUPS)]
+    dirs = icon_choices()
     return colors, dirs
 
 
@@ -678,14 +732,17 @@ def _graft(target: Path, src: Path) -> None:
 
 
 def add_chart_sheet(xlsx: Path | str, icon_dir: Path | str = ICON_DIR, split_lr: bool = False, unit_m: float = 0.0,
-                    all_cameras: bool = True, per_camera: bool = False, cameras: Collection[str] | None = None) -> ChartData:
+                    all_cameras: bool = True, per_camera: bool = False, cameras: Collection[str] | None = None,
+                    colors: Collection[int] | None = None, icon_files: Collection[str] | None = None) -> ChartData:
     """xlsx に「距離向き精度分析チャート」シートを追加する（あれば置き換える）。戻り値は読み取った内容（点の数など）。
     チャートは Python（Pillow）で描いた画像を貼り付ける（Excel のチャート機能は使わない）。
     split_lr=True: 横軸を中心 0 m の左右にとり、横の画像の顔の向きで左側 / 右側 / 両側に振り分ける。
     unit_m > 0: 距離の集計単位。縦・横それぞれ「顔の向き × 距離の区間」ごとに、セルの値の平均で色を、距離の平均で位置を決める（aggregate_points）。
     all_cameras: すべてのカメラを 1 チャートにプロット / per_camera: カメラIDごとに 1 チャートずつプロット（両方 True ならカメラ数 + 1 個。
     同じシートに縦に並べる。どちらも False はエラー）。
-    cameras: 対象にするカメラID（None = すべて）。どちらの出力対象でも、ここで選んだカメラの画像だけを使う。"""
+    cameras: 対象にするカメラID（None = すべて）。どちらの出力対象でも、ここで選んだカメラの画像だけを使う。
+    colors: 出力対象の色の段階（COLOR_GROUPS の番号。None = すべて）/ icon_files: 出力対象のアイコンのファイル名（icon_choices。None = すべて）。
+    選ばなかった色・アイコンの点はプロットしない（集計単位を指定したときは、集計した後の点に適用する）。"""
     path, icons = Path(xlsx), Path(icon_dir)
     if not path.is_file():
         raise ValueError(f"Excel ファイルが見つかりません: {path}")
@@ -693,6 +750,10 @@ def add_chart_sheet(xlsx: Path | str, icon_dir: Path | str = ICON_DIR, split_lr:
         raise ValueError(f"アイコン画像フォルダが見つかりません: {icons}")
     data = read_chart_data(path)
     charts = chart_targets(data, all_cameras, per_camera, unit_m, cameras)
+    if charts and (colors is not None or icon_files is not None):
+        charts = [(label, pts) for label, pts in ((label, filter_points(pts, colors, icon_files)) for label, pts in charts) if pts]
+        if not charts:
+            raise ValueError("選んだ色・アイコンに当てはまる点がありません。対象の色・アイコンを見直してください。")
     if not charts:
         raise ValueError("チャートに出せるデータがありません（距離・顔の向きが入った画像の組合せがありません）。"
                          "「対象画像情報」シートの「顔の向き」（正面 / 左横 / 右横 / 左斜め正面 / 右斜め正面）を入力してください。")

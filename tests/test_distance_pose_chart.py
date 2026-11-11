@@ -383,3 +383,41 @@ def test_camera_setting_roundtrip(tmp_path):
     save_distance_pose_chart_settings({**s, "all_cameras": False, "per_camera": True}, p)
     s = load_distance_pose_chart_settings(p)
     assert s["all_cameras"] is False and s["per_camera"] is True
+
+
+def _rgb_of(n):
+    from compare_face.core.report.verify_face_size_excel import count_fill
+    h = count_fill(n).fgColor.rgb[-6:]
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def test_color_groups_cover_all_bins_and_legend_has_seven():
+    assert len(dpc.COLOR_GROUPS) == 7
+    assert [dpc.color_group(_rgb_of(n)) for n in (0, 1, 10, 11, 21, 51, 101, 300, 450, 451, 10_000)] == [0, 1, 1, 2, 3, 4, 5, 5, 5, 6, 6]
+    assert dpc.color_group((1, 2, 3)) is None
+    colors, dirs = dpc.legend_items()
+    assert len(colors) == 7 and len(dirs) == 15 == len(dpc.icon_choices())
+
+
+def test_filter_points_by_color_and_icon():
+    pts = [ChartPoint(1, 1, "front_front.png", _rgb_of(0)), ChartPoint(2, 2, "front_left.png", _rgb_of(30)),
+           ChartPoint(3, 3, "front_front.png", _rgb_of(30)), ChartPoint(4, 4, "front_front.png", (1, 2, 3))]
+    assert dpc.filter_points(pts) == pts
+    assert [p.x for p in dpc.filter_points(pts, colors={0})] == [1, 4]                      # 段階に当てはまらない色は色では除かない
+    assert [p.x for p in dpc.filter_points(pts, colors={3})] == [2, 3, 4]
+    assert [p.x for p in dpc.filter_points(pts, icons={"front_left.png"})] == [2]
+    assert [p.x for p in dpc.filter_points(pts, colors={0, 3}, icons={"front_front.png"})] == [1, 3, 4]
+    assert dpc.filter_points(pts, colors=set()) == [p for p in pts if dpc.color_group(p.rgb) is None]
+
+
+@_FONT
+def test_add_chart_sheet_with_color_and_icon_selection(tmp_path, monkeypatch):
+    out = _report(tmp_path, monkeypatch)
+    _set_directions(out, ["正面", "左横", "右斜め正面"])
+    all_ = add_chart_sheet(out)
+    first = dpc.read_chart_data(out).points[0].icon
+    only = add_chart_sheet(out, icon_files={first})
+    assert 0 < only.n_icons <= all_.n_icons                                                   # アイコンを絞ると点が減る
+    with pytest.raises(ValueError):
+        add_chart_sheet(out, icon_files=set())                                                    # 何も残らなければエラー
+
