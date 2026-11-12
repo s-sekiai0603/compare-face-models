@@ -52,10 +52,11 @@ SIM_BINS = (
     (0.7, "FF63BE7B"),
 )
 
-# 誤識別の件数の段階: 0 / 1〜10 / 11〜20 / 21〜50 / 51〜100 / 以降 50 件刻み。MAX_COUNT_BIN 以上は同じ色で打ち止め
-MAX_COUNT_BIN = 12   # 451 件以上
+# 誤識別の件数の段階（順位 = 件数 + 1 で 1 位 / 2〜10 位 / 11〜20 位 / 21〜50 位 / 51〜100 位 / 以降 50 刻み）: 0 / 1〜9 / 10〜19 / 20〜49 / 50〜99 / 以降 50 件刻み。
+# MAX_COUNT_BIN 以上は同じ色で打ち止め
+MAX_COUNT_BIN = 12   # 450 件以上（451 位以降）
 _COUNT_COLORS = ((0xFF, 0xEB, 0x84), (0xFD, 0xB0, 0x7A), (0xF8, 0x69, 0x6B), (0xC0, 0x00, 0x00))  # 黄 → 橙 → 赤 → 濃赤
-_COUNT_LEGEND = (0, 1, 11, 21, 51, 101, 10_000)  # 凡例に出す段階の代表件数
+_COUNT_LEGEND = (0, 1, 10, 20, 50, 100, 10_000)  # 凡例に出す段階の代表件数
 
 # 順位の段階（上限, 表示名）。1 位は緑、2 位以降は段階が上がるほど 黄 → 橙 → 赤 → 濃赤。最後の段階は上限なし
 RANK_BINS = ((1, "1位"), (2, "2位"), (3, "3位"), (5, "4〜5位"), (10, "6〜10位"), (20, "11〜20位"), (50, "21〜50位"), (None, "51位以降"))
@@ -102,21 +103,22 @@ def bin_label(i: int) -> str:
 
 
 def count_bin(n: int) -> int:
-    """件数の段階（0: 0 件 / 1: 1〜10 / 2: 11〜20 / 3: 21〜50 / 4: 51〜100 / 5〜: 101 件以降 50 件刻み。MAX_COUNT_BIN で打ち止め）。"""
+    """件数の段階（0: 0 件 / 1: 1〜9 / 2: 10〜19 / 3: 20〜49 / 4: 50〜99 / 5〜: 100 件以降 50 件刻み。MAX_COUNT_BIN で打ち止め）。
+    順位（件数 + 1）では 1 位 / 2〜10 位 / 11〜20 位 / 21〜50 位 / 51〜100 位 / 101〜 に当たる。"""
     if n <= 0:
         return 0
-    for b, upper in enumerate((10, 20, 50, 100), start=1):
+    for b, upper in enumerate((9, 19, 49, 99), start=1):
         if n <= upper:
             return b
-    return min(MAX_COUNT_BIN, 4 + math.ceil((n - 100) / 50))
+    return min(MAX_COUNT_BIN, 4 + math.ceil((n - 99) / 50))
 
 
 def count_bin_label(b: int) -> str:
     if b <= 4:
-        return ("0 件", "1〜10 件", "11〜20 件", "21〜50 件", "51〜100 件")[b]
+        return ("0 件", "1〜9 件", "10〜19 件", "20〜49 件", "50〜99 件")[b]
     if b >= MAX_COUNT_BIN:
-        return f"{101 + (MAX_COUNT_BIN - 5) * 50} 件以上"
-    start = 101 + (b - 5) * 50
+        return f"{100 + (MAX_COUNT_BIN - 5) * 50} 件以上"
+    start = 100 + (b - 5) * 50
     return f"{start}〜{start + 49} 件"
 
 
@@ -301,7 +303,7 @@ def _build_misidentify(ws, entries: list[GalleryEntry], counts: np.ndarray, n_no
 
     _build_matrix_sheet(ws, entries, "比較結果：誤識別画像数まとめ",
                         f"縦の画像（行）を基準に、横の画像（列）との類似度より高く出た非対象者の画像の数（非対象者 {n_nontarget} 枚の中）。"
-                        "対象者どうしの類似度が高いものは数えない。色は件数の段階（0 / 1〜10 / 11〜20 / 21〜50 / 51〜100 / 以降 50 件刻み）。",
+                        "対象者どうしの類似度が高いものは数えない。色は件数の段階（0 / 1〜9 / 10〜19 / 20〜49 / 50〜99 / 以降 50 件刻み）。",
                         legend, cell, lookup)
 
 

@@ -56,10 +56,10 @@ _ICON_TABLE = {
 ICON_FILES = {frozenset(k): f"{v}.png" for k, v in _ICON_TABLE.items()}
 
 
-# 色の凡例の 7 段階（ラベル, 段階の下限, 上限）。段階 = verify_face_size_excel.count_bin（0〜MAX_COUNT_BIN）。出力対象の色の選択はこの 7 つで行う
+# 色の凡例の 7 段階（ラベルは順位 = 誤識別数 + 1。ラベル, 段階の下限, 上限）。段階 = verify_face_size_excel.count_bin（0〜MAX_COUNT_BIN）。出力対象の色の選択はこの 7 つで行う
 COLOR_GROUPS = (
-    ("0 件", 0, 0), ("1〜10 件", 1, 1), ("11〜20 件", 2, 2), ("21〜50 件", 3, 3), ("51〜100 件", 4, 4),
-    ("101〜450 件", 5, MAX_COUNT_BIN - 1), (f"{101 + (MAX_COUNT_BIN - 5) * 50} 件以上", MAX_COUNT_BIN, MAX_COUNT_BIN),
+    ("1 位", 0, 0), ("2〜10 位", 1, 1), ("11〜20 位", 2, 2), ("21〜50 位", 3, 3), ("51〜100 位", 4, 4),
+    ("101〜450 位", 5, MAX_COUNT_BIN - 1), ("451 位以降", MAX_COUNT_BIN, MAX_COUNT_BIN),
 )
 
 
@@ -70,7 +70,7 @@ def _hex_rgb(s: str) -> tuple[int, int, int]:
 
 def _bin_rep_count(b: int) -> int:
     """段階 b の代表件数。"""
-    return (0, 1, 11, 21, 51)[b] if b <= 4 else 101 + (b - 5) * 50
+    return (0, 1, 10, 20, 50)[b] if b <= 4 else 100 + (b - 5) * 50
 
 
 _GROUP_OF_RGB: dict[tuple[int, int, int], int] = {}
@@ -106,6 +106,24 @@ def filter_points(points: list["ChartPoint"], colors: Collection[int] | None = N
             if g is not None and g not in colors:
                 continue
         out.append(p)
+    return out
+
+
+def combination_charts(charts: list[tuple[str, list["ChartPoint"]]], colors: Collection[int] | None = None,
+                       icons: Collection[str] | None = None) -> list[tuple[str, list["ChartPoint"]]]:
+    """チャート（[(ラベル, 点)]）を「色の段階 × アイコン」の組合せごとに分ける。colors / icons は出力対象（None = すべて）。
+    ラベルは「<元のラベル>・<色>・<アイコン>」。点が無い組合せのチャートは含めない。段階に当てはまらない色の点はどの組合せにも入れない。"""
+    out = []
+    for label, pts in charts:
+        for g, (color_label, _, _) in enumerate(COLOR_GROUPS):
+            if colors is not None and g not in colors:
+                continue
+            for icon_label, fname in icon_choices():
+                if icons is not None and fname not in icons:
+                    continue
+                sub = [p for p in pts if p.icon == fname and color_group(p.rgb) == g]
+                if sub:
+                    out.append((f"{label}・{color_label}・{icon_label}", sub))
     return out
 
 
@@ -158,6 +176,7 @@ class ChartData:
     hor_cam: list = field(default_factory=list)   # 横 j のカメラID
     charts: list = field(default_factory=list)    # 描いたチャート [(ラベル, アイコンの数)]
     n_groups: int = 0           # 距離の集計単位で集計したときの、集計後の縦・横のグループの組合せ数
+    png_files: list = field(default_factory=list)   # 出力した透過 PNG のパス
 
 
 def _norm(v) -> str:
@@ -417,8 +436,22 @@ def _px_pos(v: float, lo: float, hi: float, start: float, size: float, invert: b
     return start + (1 - t if invert else t) * size
 
 
+def safe_label(label: str) -> str:
+    """ラベルをファイル名に使える形にする（禁則文字・空白は _ に置換）。chart_png_path とビューア（chart_png_viewer）で共通。"""
+    return re.sub(r'[\\/:*?"<>|\s]+', "_", label).strip("_")
+
+
+def chart_png_path(xlsx: Path, label: str, png_dir: Path | str | None = None) -> Path:
+    """チャート画像の PNG ファイルの出力先（png_dir。未指定は Excel と同じフォルダ。<Excel名>_チャート[_<ラベル>].png）。"""
+    safe = safe_label(label)
+    name = f"{xlsx.stem}_チャート{'_' + safe if safe else ''}.png"
+    return Path(png_dir) / name if png_dir else xlsx.with_name(name)
+
+
 def _build_sheet_workbook(data: ChartData, path: Path, icon_dir: Path, split_lr: bool = False, unit_m: float = 0.0,
-                          charts: list[tuple[str, list[ChartPoint]]] | None = None) -> None:
+                          charts: list[tuple[str, list[ChartPoint]]] | None = None, transparent: bool = False,
+                          png_paths: list[Path] | None = None, to_excel: bool = True,
+                          axis_points: list[ChartPoint] | None = None) -> None:
     """新シートだけのブックを path に保存する。Python（Pillow）で描いたチャート全体の画像を、charts の 1 つにつき 1 枚、縦に並べて貼る
     （charts が None なら data.points の 1 枚）。セルは数値のみ（A: 横の距離, B: 縦の距離, C: チャートの番号。参照用）で、
     文字列は持たない（zip へ移植するため）。"""
@@ -433,12 +466,19 @@ def _build_sheet_workbook(data: ChartData, path: Path, icon_dir: Path, split_lr:
             ws.cell(row=row, column=2, value=round(y, 4))
             ws.cell(row=row, column=3, value=k + 1)
             row += 1
-        img = XlImage(io.BytesIO(render_chart_image(replace(data, points=pts), icon_dir, split_lr, unit_m, label)))
+        chart_data = replace(data, points=pts)
+        png = render_chart_image(chart_data, icon_dir, split_lr, unit_m, label, transparent, axis_points)
+        if png_paths:
+            png_paths[k].write_bytes(png)   # Excel に貼る画像と同じもの（透過は transparent に従う）
+        if not to_excel:
+            continue
+        img = XlImage(io.BytesIO(png))
         y0 = CHART_Y0_PX + k * (CHART_H_PX + CHART_GAP_PX)
         img.anchor = AbsoluteAnchor(pos=XDRPoint2D(CHART_X0_PX * EMU_PER_PX, y0 * EMU_PER_PX),
                                     ext=XDRPositiveSize2D(CHART_W_PX * EMU_PER_PX, CHART_H_PX * EMU_PER_PX))
         ws.add_image(img)
-    wb.save(path)
+    if to_excel:
+        wb.save(path)
 
 
 # ---- 凡例（チャートの右の余白）----
@@ -456,7 +496,7 @@ def legend_layout() -> list[tuple[str, float, float, object]]:
     x0 = CHART_X0_PX + (PLOT[0] + PLOT[2] + 0.025) * CHART_W_PX
     y = CHART_Y0_PX + PLOT[1] * CHART_H_PX
     tx = x0 + LEGEND_ICON_PX + 16
-    out: list[tuple[str, float, float, object]] = [("head", x0, y, "アイコンの色（誤識別数）")]
+    out: list[tuple[str, float, float, object]] = [("head", x0, y, "アイコンの色（順位）")]
     y += LEGEND_ROW_PX + 8
     for label, rgb in colors:
         out += [("swatch", x0, y + 4, rgb), ("label", tx, y, label)]
@@ -483,9 +523,12 @@ def find_japanese_font() -> str | None:
     return next((f for f in _FONT_CANDIDATES if os.path.isfile(f)), None)
 
 
-def render_chart_image(data: ChartData, icon_dir: Path, split_lr: bool = False, unit_m: float = 0.0, label: str = "") -> bytes:
+def render_chart_image(data: ChartData, icon_dir: Path, split_lr: bool = False, unit_m: float = 0.0, label: str = "",
+                       transparent: bool = False, axis_points: list[ChartPoint] | None = None) -> bytes:
     """チャート全体（軸・グリッド線・アイコン・凡例）を Pillow で 1 枚の PNG に描く。大きさは CHART_W_PX × CHART_H_PX。
-    split_lr=True: 横軸は中心を 0 m として左右に距離をとり、横の画像の顔の向きで左側 / 右側 / 両側に振り分ける（split_xs）。"""
+    split_lr=True: 横軸は中心を 0 m として左右に距離をとり、横の画像の顔の向きで左側 / 右側 / 両側に振り分ける（split_xs）。
+    transparent=True: 背景（プロット領域の内側も含む）を透明にした PNG（RGBA）にする。
+    axis_points: 軸の範囲を決める点（None = data.points）。組合せごとの出力で全チャートの軸をそろえて重ねられるようにする。"""
     from PIL import Image, ImageDraw, ImageFont
 
     font_path = find_japanese_font()
@@ -497,9 +540,16 @@ def render_chart_image(data: ChartData, icon_dir: Path, split_lr: bool = False, 
 
     W, H = CHART_W_PX, CHART_H_PX
     ox, oy = CHART_X0_PX, CHART_Y0_PX        # シート座標 → 画像座標
-    img = Image.new("RGB", (W, H), "white")
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0)) if transparent else Image.new("RGB", (W, H), "white")
+
+    def put(im, pos) -> None:
+        """アルファ付きの画像 im を pos へ重ねる（透明な背景のときは縁が黒ずまないよう alpha_composite を使う）。"""
+        if transparent:
+            img.alpha_composite(im, (max(int(pos[0]), 0), max(int(pos[1]), 0)))
+        else:
+            img.paste(im, (int(pos[0]), int(pos[1])), im)
     d = ImageDraw.Draw(img)
-    xlo, xhi, ylo, yhi, step = axis_ranges(data.points, split_lr)
+    xlo, xhi, ylo, yhi, step = axis_ranges(axis_points or data.points, split_lr)
     px, py, pw, ph = PLOT
     pl, pt, pwid, phei = px * W, py * H, pw * W, ph * H
     grid = (0x80, 0x80, 0x80)
@@ -557,10 +607,10 @@ def render_chart_image(data: ChartData, icon_dir: Path, split_lr: bool = False, 
     if split_lr:
         d.text((pl + 20, pt + 20), "← 左", fill="black", font=font(40), anchor="la")
         d.text((pl + pwid - 20, pt + 20), "右 →", fill="black", font=font(40), anchor="ra")
-    ytitle = Image.new("RGBA", (700, 60), (255, 255, 255, 0))
+    ytitle = Image.new("RGBA", (700, 60), (0, 0, 0, 0))
     ImageDraw.Draw(ytitle).text((350, 30), "縦の画像の距離 (m)", fill="black", font=font(38), anchor="mm")
     ytitle = ytitle.rotate(90, expand=True)
-    img.paste(ytitle, (int(pl - 150 - 30), int(pt + phei / 2 - 350)), ytitle)
+    put(ytitle, (pl - 150 - 30, pt + phei / 2 - 350))
 
     cache: dict[tuple, Image.Image] = {}
 
@@ -578,12 +628,12 @@ def render_chart_image(data: ChartData, icon_dir: Path, split_lr: bool = False, 
             d.rectangle([x, y, x + LEGEND_ICON_PX, y + LEGEND_ICON_PX], fill="#" + v, outline=(0x59, 0x59, 0x59), width=2)
         elif kind == "icon":
             im = icon(v, LEGEND_ICON_RGB, LEGEND_ICON_PX)
-            img.paste(im, (int(x), int(y)), im)
+            put(im, (x, y))
         else:
             d.text((x, y + LEGEND_ROW_PX / 2), v, fill="black", font=font(text_px + 3 if kind == "head" else text_px), anchor="lm")
     for x, y, fname, rgb in plot_points(data.points, split_lr):
         im = icon(fname, rgb, ICON_PX)
-        img.paste(im, (int(X(x) - ICON_PX / 2), int(Y(y) - ICON_PX / 2)), im)
+        put(im, (X(x) - ICON_PX / 2, Y(y) - ICON_PX / 2))
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)
     return buf.getvalue()
@@ -733,7 +783,9 @@ def _graft(target: Path, src: Path) -> None:
 
 def add_chart_sheet(xlsx: Path | str, icon_dir: Path | str = ICON_DIR, split_lr: bool = False, unit_m: float = 0.0,
                     all_cameras: bool = True, per_camera: bool = False, cameras: Collection[str] | None = None,
-                    colors: Collection[int] | None = None, icon_files: Collection[str] | None = None) -> ChartData:
+                    colors: Collection[int] | None = None, icon_files: Collection[str] | None = None,
+                    transparent: bool = False, output_excel: bool = True, output_png: bool = False,
+                    combination: bool = False, png_dir: Path | str | None = None) -> ChartData:
     """xlsx に「距離向き精度分析チャート」シートを追加する（あれば置き換える）。戻り値は読み取った内容（点の数など）。
     チャートは Python（Pillow）で描いた画像を貼り付ける（Excel のチャート機能は使わない）。
     split_lr=True: 横軸を中心 0 m の左右にとり、横の画像の顔の向きで左側 / 右側 / 両側に振り分ける。
@@ -742,15 +794,28 @@ def add_chart_sheet(xlsx: Path | str, icon_dir: Path | str = ICON_DIR, split_lr:
     同じシートに縦に並べる。どちらも False はエラー）。
     cameras: 対象にするカメラID（None = すべて）。どちらの出力対象でも、ここで選んだカメラの画像だけを使う。
     colors: 出力対象の色の段階（COLOR_GROUPS の番号。None = すべて）/ icon_files: 出力対象のアイコンのファイル名（icon_choices。None = すべて）。
-    選ばなかった色・アイコンの点はプロットしない（集計単位を指定したときは、集計した後の点に適用する）。"""
+    選ばなかった色・アイコンの点はプロットしない（集計単位を指定したときは、集計した後の点に適用する）。
+    combination=True: 選んだ色 × 選んだアイコンの組合せごとに 1 チャートを出す（最大 7 × 15 = 105 種類。点が無い組合せは出さない。
+    カメラの出力対象ごとに繰り返す）。False は選んだ色・アイコンのどれかに当てはまる点を 1 チャートにまとめる（OR 条件）。
+    transparent: チャート画像の背景（プロット領域の内側も含む）を透明にする。
+    output_excel: チャート画像を Excel のシートに出力する / output_png: チャート画像を PNG ファイルとして png_dir（未指定は Excel と同じフォルダ。無ければ作る）に出力する
+    （chart_png_path。data.png_files）。両方 True も可、両方 False はエラー。透過するかどうかは transparent で両方に共通。"""
     path, icons = Path(xlsx), Path(icon_dir)
+    if not output_excel and not output_png:
+        raise ValueError("出力方式（Excel シート / PNG ファイル）を 1 つ以上選んでください。")
     if not path.is_file():
         raise ValueError(f"Excel ファイルが見つかりません: {path}")
     if not icons.is_dir():
         raise ValueError(f"アイコン画像フォルダが見つかりません: {icons}")
     data = read_chart_data(path)
     charts = chart_targets(data, all_cameras, per_camera, unit_m, cameras)
-    if charts and (colors is not None or icon_files is not None):
+    axis_points = None
+    if charts and combination:
+        axis_points = [p for _, pts in charts for p in pts]   # 組合せに分ける前の全点で軸を決め、全チャートで軸をそろえる（重ねて見られる）
+        charts = combination_charts(charts, colors, icon_files)
+        if not charts:
+            raise ValueError("選んだ色・アイコンの組合せに当てはまる点がありません。対象の色・アイコンを見直してください。")
+    elif charts and (colors is not None or icon_files is not None):
         charts = [(label, pts) for label, pts in ((label, filter_points(pts, colors, icon_files)) for label, pts in charts) if pts]
         if not charts:
             raise ValueError("選んだ色・アイコンに当てはまる点がありません。対象の色・アイコンを見直してください。")
@@ -763,8 +828,13 @@ def add_chart_sheet(xlsx: Path | str, icon_dir: Path | str = ICON_DIR, split_lr:
     tmp = path.with_name(path.stem + ".chart_tmp.xlsx")
     try:
         data.n_icons = sum(n for _, n in data.charts)
-        _build_sheet_workbook(data, tmp, icons, split_lr, unit_m, charts)
-        _graft(path, tmp)
+        png_paths = [chart_png_path(path, label, png_dir) for label, _ in charts] if output_png else None
+        if png_paths and png_dir:
+            Path(png_dir).mkdir(parents=True, exist_ok=True)
+        _build_sheet_workbook(data, tmp, icons, split_lr, unit_m, charts, transparent, png_paths, output_excel, axis_points)
+        data.png_files = list(png_paths or [])
+        if output_excel:
+            _graft(path, tmp)
     finally:
         tmp.unlink(missing_ok=True)
     return data

@@ -171,10 +171,11 @@ def test_count_misidentified_ties_are_not_counted():
 
 def test_count_bins_and_colors():
     from compare_face.core.report.verify_face_size_excel import MAX_COUNT_BIN, count_bin, count_fill
-    assert [count_bin(n) for n in (0, 1, 10, 11, 20, 21, 50, 51, 100, 101, 150, 151, 200)] == [0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
+    assert [count_bin(n) for n in (0, 1, 9, 10, 19, 20, 49, 50, 99, 100, 149, 150, 199)] == [0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
+    assert [count_bin(n) for n in (449, 450)] == [MAX_COUNT_BIN - 1, MAX_COUNT_BIN]
     assert count_bin(10**6) == MAX_COUNT_BIN
     assert count_fill(0).fgColor.rgb == "FF63BE7B"
-    assert len({count_fill(n).fgColor.rgb for n in (0, 1, 11, 21, 51, 101, 10**6)}) == 7
+    assert len({count_fill(n).fgColor.rgb for n in (0, 1, 10, 20, 50, 100, 10**6)}) == 7
 
 
 def test_run_misidentify_and_both(tmp_path, monkeypatch):

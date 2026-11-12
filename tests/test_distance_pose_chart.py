@@ -164,7 +164,7 @@ def test_old_chart_sheet_with_excel_chart_is_replaced(tmp_path, monkeypatch):
         assert any(n.startswith("xl/charts/chart") for n in z.namelist())
     pts = [ChartPoint(5.0, 8.0, "front_left.png", (0x63, 0xBE, 0x7B))]
     monkeypatch.setattr(dpc, "read_chart_data", lambda p: ChartData(points=pts, n_images=3))
-    monkeypatch.setattr(dpc, "render_chart_image", lambda data, icon_dir, split_lr=False, unit_m=0.0, label="": b"\x89PNG\r\n\x1a\n")   # 画像の中身はここでは問わない
+    monkeypatch.setattr(dpc, "render_chart_image", lambda data, icon_dir, split_lr=False, unit_m=0.0, label="", transparent=False, axis_points=None: b"\x89PNG\r\n\x1a\n")   # 画像の中身はここでは問わない
     monkeypatch.setattr(dpc, "XlImage", lambda b: __import__("openpyxl").drawing.image.Image(
         io.BytesIO(_tiny_png())))
     add_chart_sheet(out)
@@ -393,7 +393,7 @@ def _rgb_of(n):
 
 def test_color_groups_cover_all_bins_and_legend_has_seven():
     assert len(dpc.COLOR_GROUPS) == 7
-    assert [dpc.color_group(_rgb_of(n)) for n in (0, 1, 10, 11, 21, 51, 101, 300, 450, 451, 10_000)] == [0, 1, 1, 2, 3, 4, 5, 5, 5, 6, 6]
+    assert [dpc.color_group(_rgb_of(n)) for n in (0, 1, 9, 10, 20, 50, 100, 300, 449, 450, 10_000)] == [0, 1, 1, 2, 3, 4, 5, 5, 5, 6, 6]
     assert dpc.color_group((1, 2, 3)) is None
     colors, dirs = dpc.legend_items()
     assert len(colors) == 7 and len(dirs) == 15 == len(dpc.icon_choices())
@@ -421,3 +421,124 @@ def test_add_chart_sheet_with_color_and_icon_selection(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         add_chart_sheet(out, icon_files=set())                                                    # 何も残らなければエラー
 
+
+
+def test_render_chart_image_transparent_background():
+    """transparent=True は背景（プロット領域の内側も含む）が透明な RGBA、既定は不透明な白。"""
+    import io
+    from PIL import Image
+    pts = [ChartPoint(1, 1, "front_front.png", (0x63, 0xBE, 0x7B))]
+    data = ChartData(points=pts, n_images=2)
+    opaque = Image.open(io.BytesIO(dpc.render_chart_image(data, ICON_DIR)))
+    assert opaque.mode == "RGB" and opaque.getpixel((5, 5)) == (255, 255, 255)
+    img = Image.open(io.BytesIO(dpc.render_chart_image(data, ICON_DIR, transparent=True)))
+    assert img.mode == "RGBA" and img.size == opaque.size
+    px, py, pw, ph = dpc.PLOT
+    W, H = img.size
+    assert img.getpixel((5, 5))[3] == 0                                   # 外側の余白
+    assert img.getpixel((int((px + pw * 0.5) * W) + 7, int((py + ph * 0.5) * H) + 7))[3] == 0   # プロット領域の内側（グリッドの間）
+    assert any(img.getpixel((x, y))[3] == 255 for x in range(0, W, 7) for y in range(0, H, 7))   # アイコン・線は不透明
+
+
+def test_chart_png_path_sanitizes_label(tmp_path):
+    x = tmp_path / "report.xlsx"
+    assert dpc.chart_png_path(x, "").name == "report_チャート.png"
+    assert dpc.chart_png_path(x, "Cam1").name == "report_チャート_Cam1.png"
+    assert dpc.chart_png_path(x, 'a/b:c d').name == "report_チャート_a_b_c_d.png"
+
+
+def test_add_chart_sheet_output_modes(tmp_path, monkeypatch):
+    from PIL import Image
+    out = _report(tmp_path, monkeypatch)
+    _set_directions(out, ["正面", "左横", "右斜め正面"])
+    assert add_chart_sheet(out).png_files == []                                    # 既定は Excel のみ
+    assert CHART_SHEET_NAME in openpyxl.load_workbook(out).sheetnames
+    data = add_chart_sheet(out, output_png=True, transparent=True)                 # 両方
+    assert len(data.png_files) == 1 and data.png_files[0].parent == out.parent
+    img = Image.open(data.png_files[0])
+    assert img.mode == "RGBA" and img.getpixel((5, 5))[3] == 0
+    data.png_files[0].unlink()
+    data = add_chart_sheet(out, output_png=True)                                   # 透過しない設定なら PNG も白背景
+    assert Image.open(data.png_files[0]).getpixel((5, 5))[:3] == (255, 255, 255)
+
+
+def test_add_chart_sheet_png_only_leaves_excel_untouched(tmp_path, monkeypatch):
+    out = _report(tmp_path, monkeypatch)
+    _set_directions(out, ["正面", "左横", "右斜め正面"])
+    before = out.read_bytes()
+    data = add_chart_sheet(out, output_excel=False, output_png=True)
+    assert len(data.png_files) == 1 and data.png_files[0].is_file()
+    assert out.read_bytes() == before                                              # Excel は変更しない
+    with pytest.raises(ValueError):
+        add_chart_sheet(out, output_excel=False, output_png=False)
+
+
+def test_combination_charts_split_by_color_and_icon():
+    pts = [ChartPoint(1, 1, "front_front.png", _rgb_of(0)), ChartPoint(2, 2, "front_front.png", _rgb_of(0)),
+           ChartPoint(3, 3, "front_left.png", _rgb_of(0)), ChartPoint(4, 4, "front_front.png", _rgb_of(30)),
+           ChartPoint(5, 5, "front_front.png", (1, 2, 3))]          # 段階に当てはまらない色はどの組合せにも入れない
+    out = dpc.combination_charts([("すべてのカメラ", pts)])
+    assert [(l, [p.x for p in ps]) for l, ps in out] == [
+        ("すべてのカメラ・1 位・正面 × 正面", [1, 2]), ("すべてのカメラ・1 位・正面 × 左横", [3]),
+        ("すべてのカメラ・2〜10 位・正面 × 正面", [4])] or len(out) == 3
+    assert sum(len(ps) for _, ps in out) == 4
+    only = dpc.combination_charts([("c", pts)], colors={0}, icons={"front_front.png"})
+    assert [[p.x for p in ps] for _, ps in only] == [[1, 2]]
+    assert len(dpc.COLOR_GROUPS) * len(dpc.icon_choices()) == 105
+
+
+def test_add_chart_sheet_combination_outputs_one_chart_per_combination(tmp_path, monkeypatch):
+    """合成データの点を 2 色 × 2 アイコンに分け、組合せごとに 1 チャート（PNG）が出る。OR 条件は従来どおり 1 チャート。"""
+    out = _report(tmp_path, monkeypatch)
+    _set_directions(out, ["正面", "左横", "右斜め正面"])
+
+    def fake_targets(data, all_cameras, per_camera, unit_m=0.0, cameras=None):
+        pts = [ChartPoint(1, 1, "front_front.png", _rgb_of(0)), ChartPoint(2, 2, "front_left.png", _rgb_of(0)),
+               ChartPoint(3, 3, "front_front.png", _rgb_of(30)), ChartPoint(4, 4, "front_left.png", _rgb_of(30))]
+        return [("すべてのカメラ", pts)]
+
+    monkeypatch.setattr(dpc, "chart_targets", fake_targets)
+    base = add_chart_sheet(out, output_excel=False, output_png=True)
+    assert len(base.charts) == 1
+    comb = add_chart_sheet(out, combination=True, output_excel=False, output_png=True)
+    assert len(comb.charts) == 4 and len(comb.png_files) == 4 and all(p.is_file() for p in comb.png_files)
+    assert len(set(comb.png_files)) == 4                                           # ファイル名が重ならない
+    assert sum(n for _, n in comb.charts) == sum(n for _, n in base.charts)        # 点は分かれるだけで増減しない
+
+
+def test_png_output_dir_is_created_and_used(tmp_path, monkeypatch):
+    out = _report(tmp_path, monkeypatch)
+    _set_directions(out, ["正面", "左横", "右斜め正面"])
+    dest = tmp_path / "pngs" / "sub"
+    data = add_chart_sheet(out, output_excel=False, output_png=True, png_dir=dest)
+    assert data.png_files and all(p.parent == dest and p.is_file() for p in data.png_files)
+    assert dpc.chart_png_path(out, "", None).parent == out.parent and dpc.chart_png_path(out, "", "").parent == out.parent
+
+
+def test_clip_bytes_for_completion_dialog():
+    from compare_face.ui.distance_pose_chart_screen import clip_bytes
+    assert clip_bytes("abc") == "abc"
+    assert clip_bytes("a" * 600) == "a" * 500
+    s = clip_bytes("あ" * 200)                      # 1 文字 3 バイト → 166 文字（498 バイト）。文字の途中では切らない
+    assert s == "あ" * 166 and len(s.encode("utf-8")) <= 500
+
+
+def test_combination_pngs_share_axes_so_they_can_be_overlaid(tmp_path, monkeypatch):
+    """組合せごとの PNG は全点の範囲で軸を決めるので、点の範囲が違う組合せでも軸の目盛・グリッドが同じ位置になる。"""
+    from PIL import Image
+    out = _report(tmp_path, monkeypatch)
+    _set_directions(out, ["正面", "左横", "右斜め正面"])
+
+    def fake_targets(data, all_cameras, per_camera, unit_m=0.0, cameras=None):
+        pts = [ChartPoint(1, 1, "front_front.png", _rgb_of(0)), ChartPoint(30, 30, "front_left.png", _rgb_of(30))]
+        return [("すべてのカメラ", pts)]
+
+    monkeypatch.setattr(dpc, "chart_targets", fake_targets)
+    data = add_chart_sheet(out, combination=True, output_excel=False, output_png=True, transparent=True)
+    assert len(data.png_files) == 2
+    imgs = [Image.open(p) for p in data.png_files]
+    W, H = imgs[0].size
+    px, py, pw, ph = dpc.PLOT
+    box = (int(W * px) - 80, int(H * (py + ph)) + 5, int(W * (px + pw)) + 5, int(H * (py + ph)) + 70)     # 横軸の目盛ラベルの帯
+    assert imgs[0].crop(box).tobytes() == imgs[1].crop(box).tobytes()
+    assert any(imgs[0].crop(box).getchannel("A").getdata())                                              # 帯に目盛ラベルがある

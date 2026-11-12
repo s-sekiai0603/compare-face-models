@@ -138,11 +138,22 @@ DISTANCE_POSE_CHART_DEFAULTS = {
     "excel_path": "",    # チャートを追加する Excel（顔サイズ別精度検証のレポート）
     "split_lr": False,   # 顔の向きをチャートの左右に振り分ける（横軸を中心 0 m の左右にとる）
     "unit_m": 0.0,       # 距離の集計単位(m)。0 = 集計しない（画像 1 枚ずつプロット）
+    "transparent": False,    # チャート画像の背景を透明にする（プロット領域の内側も含む）
+    "output_excel": True,    # チャート出力方式: Excel シートに出力する
+    "combination": False,    # 色 × アイコンの組合せごとにチャートを出力する（False = 選んだ色・アイコンの OR 条件で 1 チャート）
+    "png_dir": "",           # PNG の出力先フォルダ（空 = Excel と同じフォルダ）
+    "output_png": False,     # チャート出力方式: 画像ファイル(png)として出力する（Excel と同じフォルダ）
     "all_cameras": True,     # 出力対象: すべてのカメラを 1 チャートにプロット
     "per_camera": False,     # 出力対象: カメラIDごとに 1 チャートずつプロット
     "excluded_colors": [],   # 出力対象から外した色の段階の番号（distance_pose_chart.COLOR_GROUPS。それ以外は対象）
     "excluded_icons": [],    # 出力対象から外したアイコンのファイル名（それ以外は対象）
     "excluded_cameras": [],  # カメラIDのリストで、チェックを外したカメラID（それ以外は対象）
+    "viewer_dir": "",        # チャート(PNG)ビューアの PNG の格納先（空 = 「PNG の出力先」）
+    "viewer_out_dir": "",    # ビューアで重ねた画像の PNG の出力先フォルダ
+    "viewer_color_order": [],   # ビューアの対象の色の並び順（色の段階の番号。上ほど手前。空 = 既定の順）
+    "viewer_icon_order": [],    # ビューアの対象のアイコンの並び順（ファイル名。上ほど手前）
+    "viewer_excluded_colors": [],   # ビューアで外した色の段階の番号
+    "viewer_excluded_icons": [],    # ビューアで外したアイコンのファイル名
 }
 
 

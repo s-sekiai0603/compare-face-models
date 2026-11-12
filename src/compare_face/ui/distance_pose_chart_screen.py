@@ -10,17 +10,24 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-    QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
 from ..core.common.settings import load_distance_pose_chart_settings, save_distance_pose_chart_settings
 from ..core.report.distance_pose_chart import (
     CHART_SHEET_NAME, COLOR_GROUPS, ICON_DIR, add_chart_sheet, color_group_rgb, icon_choices, list_cameras,
 )
-from .widgets import add_path_row, fixed_label
+from .chart_viewer_screen import ChartViewerScreen
+from .widgets import add_check_list, add_path_row, checked_values, fixed_label, swatch_icon
 
 TITLE = "距離・向き・精度分析"
+DIALOG_MAX_BYTES = 500   # 完了ダイアログに出すメッセージの最大バイト数（UTF-8）。超えた分は出さない（全文はログ欄に出る）
+
+
+def clip_bytes(text: str, max_bytes: int = DIALOG_MAX_BYTES) -> str:
+    """text を UTF-8 で max_bytes バイトまでに切る（文字の途中では切らない）。"""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
 
 
 class DistancePoseChartScreen(QWidget):
@@ -82,12 +89,57 @@ class DistancePoseChartScreen(QWidget):
             "対象のアイコン:", "チャートに出すアイコン（顔の向きの組合せ: 縦 × 横）。チェックを外したアイコンはプロットしない", 130,
             [(label, fname, self._icon(fname), fname not in excluded_icons) for label, fname in icon_choices()], root)
 
+        crow = QHBoxLayout()
+        crow.addWidget(fixed_label("色・アイコンの条件:"))
+        self.rb_or = QRadioButton("OR条件（選んだ色・アイコンを 1 チャートに）")
+        self.rb_combo = QRadioButton("組合せごと（色 × アイコンで 1 チャートずつ）")
+        grp = QButtonGroup(self)
+        grp.addButton(self.rb_or)
+        grp.addButton(self.rb_combo)
+        (self.rb_combo if self.settings["combination"] is True else self.rb_or).setChecked(True)
+        self.rb_combo.setToolTip("選んだ色の数 × 選んだアイコンの数だけチャートを出す（すべて選ぶと 7 × 15 = 105 種類。点が無い組合せは出さない。"
+                                 "カメラ個別も出すときはカメラごとに繰り返す）")
+        crow.addWidget(self.rb_or)
+        crow.addWidget(self.rb_combo)
+        crow.addStretch()
+        root.addLayout(crow)
+
         self.cb_split = QCheckBox("顔の向きをチャートの左右に振り分け")
         self.cb_split.setChecked(self.settings["split_lr"] is True)
         self.cb_split.setToolTip(
             "横軸を中心 0 m として左右に距離をとる。横に並ぶ画像の顔の向きに「右」を含めば中心から右側、「左」を含めば左側、"
             "どちらも含まない（正面）なら右側と左側の両方にプロットする")
         root.addWidget(self.cb_split)
+
+        self.cb_transparent = QCheckBox("チャート画像の背景を透過")
+        self.cb_transparent.setChecked(self.settings["transparent"] is True)
+        self.cb_transparent.setToolTip("チャート画像の背景（プロット領域の内側の白地も含む）を透明にする。オフのときは白")
+        root.addWidget(self.cb_transparent)
+
+        orow = QHBoxLayout()
+        orow.addWidget(fixed_label("チャート出力方式:"))
+        self.cb_excel = QCheckBox("Excelシートに出力")
+        self.cb_excel.setChecked(self.settings["output_excel"] is not False)
+        self.cb_png = QCheckBox("画像ファイル(png)として出力")
+        self.cb_png.setChecked(self.settings["output_png"] is True)
+        self.cb_png.setToolTip("PNG の出力先フォルダ（未指定なら Excel と同じフォルダ）に <Excel名>_チャート[_<カメラID等>].png を出力する")
+        orow.addWidget(self.cb_excel)
+        orow.addWidget(self.cb_png)
+        orow.addStretch()
+        root.addLayout(orow)
+
+        self.png_dir_edit = QLineEdit(self.settings["png_dir"])
+        self.png_dir_edit.setReadOnly(True)
+        self.png_dir_edit.setPlaceholderText("未指定のときは Excel と同じフォルダ")
+        self.png_dir_btn = add_path_row(root, "PNG の出力先:", self.png_dir_edit, self._pick_png_dir)
+        self.btn_viewer = QPushButton("チャート(PNG)確認")
+        self.btn_viewer.setToolTip("出力したチャートの PNG を、条件を選んで重ねて表示するビューアを開く（PNG 出力のオン・オフに関係なく使える）")
+        self.btn_viewer.clicked.connect(self._open_viewer)
+        root.itemAt(root.count() - 1).layout().addWidget(self.btn_viewer)
+        self._viewer = None
+        self.png_dir_label = root.itemAt(root.count() - 1).layout().itemAt(0).widget()
+        self.cb_png.toggled.connect(self._update_png_dir_enabled)
+        self._update_png_dir_enabled()
 
         urow = QHBoxLayout()
         urow.addWidget(fixed_label("距離の集計単位:"))
@@ -122,6 +174,24 @@ class DistancePoseChartScreen(QWidget):
         self.btn_cam_all.clicked.connect(lambda: self._set_all_cameras(True))
         self.btn_cam_none.clicked.connect(lambda: self._set_all_cameras(False))
 
+    def _open_viewer(self) -> None:
+        """チャート(PNG)ビューアを開く。格納先の初期値は「PNG の出力先」（未指定なら Excel と同じフォルダ）。"""
+        folder = self.png_dir_edit.text() or (str(Path(self.excel_edit.text()).parent) if self.excel_edit.text() else "")
+        self._viewer = ChartViewerScreen(folder, self.settings, save_distance_pose_chart_settings)
+        self._viewer.show()
+
+    def _update_png_dir_enabled(self) -> None:
+        """PNG 出力がオフのときは出力先を非活性にする。"""
+        on = self.cb_png.isChecked()
+        for w in (self.png_dir_label, self.png_dir_edit, self.png_dir_btn):
+            w.setEnabled(on)
+
+    def _pick_png_dir(self) -> None:
+        start = self.png_dir_edit.text() or (str(Path(self.excel_edit.text()).parent) if self.excel_edit.text() else "")
+        d = QFileDialog.getExistingDirectory(self, "PNG の出力先フォルダを選択", start)
+        if d:
+            self.png_dir_edit.setText(d)
+
     def _pick(self) -> None:
         start = self.excel_edit.text() or ""
         path, _ = QFileDialog.getOpenFileName(self, "Excel ファイルを選択", start, "Excel (*.xlsx)")
@@ -133,52 +203,19 @@ class DistancePoseChartScreen(QWidget):
 
     @staticmethod
     def _swatch(rgb) -> QIcon:
-        pm = QPixmap(20, 20)
-        pm.fill(QColor(*rgb))
-        return QIcon(pm)
+        return swatch_icon(rgb)
 
     @staticmethod
     def _icon(fname: str) -> QIcon:
         return QIcon(str(ICON_DIR / fname))
 
     def _make_list(self, label: str, tip: str, height: int, items: list, root: QVBoxLayout) -> QListWidget:
-        """チェック付きの一覧 + 全選択・全解除ボタンの行を root に足す。items = [(表示名, 値, アイコン, チェック済みか)]。"""
-        row = QHBoxLayout()
-        row.addWidget(fixed_label(label))
-        lw = QListWidget()
-        lw.setMaximumHeight(height)
-        lw.setToolTip(tip)
-        for text, value, ico, on in items:
-            it = QListWidgetItem(ico, text)
-            it.setData(Qt.UserRole, value)
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Checked if on else Qt.Unchecked)
-            lw.addItem(it)
-        row.addWidget(lw, 1)
-        side = QVBoxLayout()
-        b_all, b_none = QPushButton("全選択"), QPushButton("全解除")
-        b_all.clicked.connect(lambda: self._set_all(lw, True))
-        b_none.clicked.connect(lambda: self._set_all(lw, False))
-        side.addWidget(b_all)
-        side.addWidget(b_none)
-        side.addStretch()
-        row.addLayout(side)
-        root.addLayout(row)
-        return lw
-
-    @staticmethod
-    def _set_all(lw: QListWidget, on: bool) -> None:
-        for k in range(lw.count()):
-            lw.item(k).setCheckState(Qt.Checked if on else Qt.Unchecked)
+        return add_check_list(root, label, tip, height, items)
 
     @staticmethod
     def _checked(lw: QListWidget) -> tuple[list, list]:
         """(チェックした値, 外した値)"""
-        on, off = [], []
-        for k in range(lw.count()):
-            it = lw.item(k)
-            (on if it.checkState() == Qt.Checked else off).append(it.data(Qt.UserRole))
-        return on, off
+        return checked_values(lw)
 
     def _load_cameras(self) -> None:
         """指定した Excel に出てくるカメラIDをリストに並べる（前回チェックを外したカメラ以外はチェック済み）。"""
@@ -238,8 +275,14 @@ class DistancePoseChartScreen(QWidget):
             QMessageBox.warning(self, TITLE, "対象のアイコンを 1 つ以上選んでください。")
             return
         split = self.cb_split.isChecked()
+        transparent = self.cb_transparent.isChecked()
+        combination = self.rb_combo.isChecked()
+        output_excel, output_png = self.cb_excel.isChecked(), self.cb_png.isChecked()
+        if not output_excel and not output_png:
+            QMessageBox.warning(self, TITLE, "チャート出力方式を 1 つ以上選んでください。")
+            return
         unit = round(self.unit_spin.value(), 1)
-        self.settings.update(excel_path=path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each, excluded_cameras=cams_off,
+        self.settings.update(excel_path=path, split_lr=split, transparent=transparent, output_excel=output_excel, output_png=output_png, png_dir=self.png_dir_edit.text(), combination=combination, unit_m=unit, all_cameras=all_cams, per_camera=each, excluded_cameras=cams_off,
                              excluded_colors=colors_off, excluded_icons=icons_off)
         save_distance_pose_chart_settings(self.settings)
         self.log.clear()
@@ -247,7 +290,7 @@ class DistancePoseChartScreen(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_back.setEnabled(False)
         try:
-            data = add_chart_sheet(path, split_lr=split, unit_m=unit, all_cameras=all_cams, per_camera=each,
+            data = add_chart_sheet(path, split_lr=split, transparent=transparent, output_excel=output_excel, output_png=output_png, png_dir=self.png_dir_edit.text() or None, combination=combination, unit_m=unit, all_cameras=all_cams, per_camera=each,
                                   cameras=cams_on if self.cam_list.count() else None,
                                   colors=None if not colors_off else colors_on, icon_files=None if not icons_off else icons_on)
         except Exception as e:  # 入力 Excel の不備・書き込み失敗（Excel で開いている等）を画面に出す
@@ -257,11 +300,14 @@ class DistancePoseChartScreen(QWidget):
         finally:
             self.btn_start.setEnabled(True)
             self.btn_back.setEnabled(True)
-        lines = [f"完了: 「{CHART_SHEET_NAME}」シートを追加しました（アイコン {data.n_icons} 個 / 画像 {data.n_images} 枚{'。左右に振り分け' if split else ''}{f'。距離 {unit:g} m 単位で集計' if unit > 0 else ''}）。"]
+        head = f"「{CHART_SHEET_NAME}」シートを追加" if output_excel else "チャート画像を出力"
+        lines = [f"完了: {head}しました（アイコン {data.n_icons} 個 / 画像 {data.n_images} 枚{'。左右に振り分け' if split else ''}{f'。距離 {unit:g} m 単位で集計' if unit > 0 else ''}）。"]
         lines.append(f"チャート {len(data.charts)} 個: " + "、".join(f"{label}（{n} 個）" for label, n in data.charts))
+        if data.png_files:
+            lines.append("PNG ファイルを出力しました:\n" + "\n".join(str(p) for p in data.png_files))
         if data.no_distance:
             lines.append(f"距離が無い画像 {data.no_distance} 枚は対象外にしました。")
         if data.no_direction:
             lines.append(f"顔の向きが未入力・不正な画像 {data.no_direction} 枚は対象外にしました（正面 / 左横 / 右横 / 左斜め正面 / 右斜め正面）。")
         self.log.appendPlainText("\n".join(lines))
-        QMessageBox.information(self, TITLE, "\n".join(lines))
+        QMessageBox.information(self, TITLE, clip_bytes("\n".join(lines)))

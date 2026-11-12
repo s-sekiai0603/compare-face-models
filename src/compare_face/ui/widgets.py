@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Qt
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QAbstractItemView, QButtonGroup, QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
     QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -32,6 +33,89 @@ def add_path_row(parent: QVBoxLayout, label: str, edit: QLineEdit, slot) -> QPus
     row.addWidget(btn)
     parent.addLayout(row)
     return btn
+
+
+def swatch_icon(rgb) -> QIcon:
+    """色見本（20px 角）のアイコン。"""
+    pm = QPixmap(20, 20)
+    pm.fill(QColor(*rgb))
+    return QIcon(pm)
+
+
+def set_all_checked(lw: QListWidget, on: bool) -> None:
+    for k in range(lw.count()):
+        lw.item(k).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+
+def checked_values(lw: QListWidget) -> tuple[list, list]:
+    """チェック付き一覧の (チェックした値, 外した値)。値は項目の Qt.UserRole。"""
+    on, off = [], []
+    for k in range(lw.count()):
+        it = lw.item(k)
+        (on if it.checkState() == Qt.Checked else off).append(it.data(Qt.UserRole))
+    return on, off
+
+
+def item_values(lw: QListWidget) -> list:
+    """一覧の全項目の値（チェックに関係なく、上から順）。"""
+    return [lw.item(k).data(Qt.UserRole) for k in range(lw.count())]
+
+
+def move_current(lw: QListWidget, delta: int) -> None:
+    """一覧の選択行を delta 行動かす（チェック状態は保つ）。"""
+    row = lw.currentRow()
+    new = row + delta
+    if row < 0 or not 0 <= new < lw.count():
+        return
+    it = lw.takeItem(row)
+    lw.insertItem(new, it)
+    lw.setCurrentRow(new)
+
+
+def add_check_list(parent: QVBoxLayout, label: str, tip: str, height: int, items: list, on_changed=None,
+                   reorderable: bool = False) -> QListWidget:
+    """「ラベル + チェック付きの一覧 + 全選択・全解除」の行を parent に足す。items = [(表示名, 値, アイコン, チェック済みか)]。
+    on_changed: チェックの変更・全選択・全解除・並べ替えのたびに呼ぶ関数。
+    reorderable=True: ドラッグ＆ドロップと「上へ」「下へ」ボタンで並び順を変えられる。"""
+    row = QHBoxLayout()
+    row.addWidget(fixed_label(label))
+    lw = QListWidget()
+    lw.setMaximumHeight(height)
+    lw.setToolTip(tip)
+    for text, value, ico, on in items:
+        it = QListWidgetItem(ico, text)
+        it.setData(Qt.UserRole, value)
+        it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+        it.setCheckState(Qt.Checked if on else Qt.Unchecked)
+        lw.addItem(it)
+    row.addWidget(lw, 1)
+    side = QVBoxLayout()
+    b_all, b_none = QPushButton("全選択"), QPushButton("全解除")
+    b_all.clicked.connect(lambda: set_all_checked(lw, True))
+    b_none.clicked.connect(lambda: set_all_checked(lw, False))
+    side.addWidget(b_all)
+    side.addWidget(b_none)
+    if reorderable:
+        lw.setDragDropMode(QAbstractItemView.InternalMove)
+        lw.setDefaultDropAction(Qt.MoveAction)
+        b_up, b_down = QPushButton("▲ 上へ"), QPushButton("▼ 下へ")
+        def move(delta: int) -> None:
+            move_current(lw, delta)
+            if on_changed is not None:     # takeItem / insertItem は rowsMoved を出さないので、ここで通知する
+                on_changed()
+
+        b_up.clicked.connect(lambda: move(-1))
+        b_down.clicked.connect(lambda: move(1))
+        side.addWidget(b_up)
+        side.addWidget(b_down)
+        if on_changed is not None:
+            lw.model().rowsMoved.connect(lambda *_a: on_changed())
+    side.addStretch()
+    row.addLayout(side)
+    parent.addLayout(row)
+    if on_changed is not None:
+        lw.itemChanged.connect(lambda _item: on_changed())
+    return lw
 
 
 def pose_registry(note: str) -> dict:
