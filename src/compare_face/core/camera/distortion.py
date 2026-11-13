@@ -86,11 +86,27 @@ class Distortion:
         """元画像 → 補正後の画像（同じ大きさ。元画像の外は黒）。"""
         if self.is_identity:
             return img
-        w, h = self.size
+        return Remapper(self).apply(img)
+
+
+class Remapper:
+    """補正後の画像を作る remap のマップを 1 回だけ作って使い回す（映像の全フレームを補正するとき用。correct_image と同じ結果）。"""
+
+    def __init__(self, dist: Distortion):
+        self.identity = dist.is_identity
+        self.size = dist.size
+        if self.identity:
+            self.map1 = self.map2 = None
+            return
+        w, h = dist.size
         xs, ys = np.meshgrid(np.arange(w, dtype=np.float64) + 0.5, np.arange(h, dtype=np.float64) + 0.5)
-        src = self.to_original(np.stack([xs, ys], axis=-1)) - 0.5
-        return cv2.remap(img, src[..., 0].astype(np.float32), src[..., 1].astype(np.float32), cv2.INTER_LINEAR,
-                         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        src = dist.to_original(np.stack([xs, ys], axis=-1)) - 0.5
+        self.map1, self.map2 = src[..., 0].astype(np.float32), src[..., 1].astype(np.float32)
+
+    def apply(self, img: np.ndarray) -> np.ndarray:
+        if self.identity:
+            return img
+        return cv2.remap(img, self.map1, self.map2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
 def _line_cost(pts_u: np.ndarray) -> float:

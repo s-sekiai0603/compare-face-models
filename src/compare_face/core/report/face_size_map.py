@@ -13,7 +13,9 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from ..camera.distortion import Distortion
 from ..common.imageio import imread, imwrite
+from ..extract.history import fisheye_lambda_of_track
 from .gallery import _bbox_side, in_excluded_dir, in_query_sets_dir
 
 HEATMAP_GRID_SIZE = 10       # 足元を集計するグリッドの大きさ(px)
@@ -37,8 +39,13 @@ def _face_height(im: dict) -> float | None:
 
 def collect_foot_points(gallery_dir: Path, min_face_height: float) -> Points:
     """比較対象フォルダの json から、顔 bbox の高さが min_face_height 以上の画像の足元位置をカメラID（小文字）ごとに集める。
-    old フォルダの画像と検索元セット置き場は除く（比較対象と同じ扱い）。"""
-    points: Points = defaultdict(list)
+    old フォルダの画像と検索元セット置き場は除く（比較対象と同じ扱い）。座標は json のまま（魚眼補正済みかは区別しない）。"""
+    return {cam: [(x, y) for x, y, _ in pts] for cam, pts in _collect_foot_points(gallery_dir, min_face_height).items()}
+
+
+def _collect_foot_points(gallery_dir: Path, min_face_height: float) -> dict[str, list[tuple[float, float, float | None]]]:
+    """collect_foot_points と同じで、各点に魚眼補正の λ を付ける（魚眼補正して抽出した追跡IDの点は λ、未補正は None。抽出履歴で判定）。"""
+    points: dict[str, list[tuple[float, float, float | None]]] = defaultdict(list)
     for jp in sorted(gallery_dir.rglob("*.json")):
         track_dir = jp.parent
         if jp.stem != track_dir.name or in_query_sets_dir(jp, gallery_dir) or in_excluded_dir(jp, gallery_dir):
@@ -50,12 +57,13 @@ def collect_foot_points(gallery_dir: Path, min_face_height: float) -> Points:
             data = json.loads(jp.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        lam = fisheye_lambda_of_track(track_dir)
         for im in data.get("images", []) if isinstance(data, dict) else []:
             h = _face_height(im)
             foot = im.get("foot_xy")
             if h is None or h < min_face_height or not foot or len(foot) < 2:
                 continue
-            points[camera_dir.name.lower()].append((float(foot[0]), float(foot[1])))
+            points[camera_dir.name.lower()].append((float(foot[0]), float(foot[1]), lam))
     return dict(points)
 
 
@@ -124,7 +132,7 @@ def run_face_size_map(gallery_dir: Path, camera_dir: Path, output_dir: Path, min
     if not images:
         raise ValueError(f"カメラ画像が見つかりません: {camera_dir}")
     say("比較対象の json を読み込み中...")
-    points = collect_foot_points(gallery_dir, min_face_height)
+    points = _collect_foot_points(gallery_dir, min_face_height)
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
     notes: list[str] = []
@@ -138,8 +146,18 @@ def run_face_size_map(gallery_dir: Path, camera_dir: Path, output_dir: Path, min
         if img is None:
             notes.append(f"{path.name}: 画像を読み込めないためスキップ")
             continue
+        lam = next((l for _, _, l in pts if l is not None), None)
+        if lam is not None:
+            # 魚眼補正して抽出した結果は補正後のフレームの座標なので、カメラ画像も同じ補正をして重ねる。
+            # 同じカメラの未補正の結果の点は、補正後の座標に直して同じ画像に描く
+            dist = Distortion(lam, (img.shape[1], img.shape[0]))
+            img = dist.correct_image(img)
+            xy = [(x, y) if l is not None else tuple(float(v) for v in dist.to_corrected((x, y))) for x, y, l in pts]
+            notes.append(f"{path.name}: 魚眼補正して抽出した結果のため、カメラ画像も魚眼補正して重ねました（λ={lam:.4f}）")
+        else:
+            xy = [(x, y) for x, y, _ in pts]
         out = output_dir / f"{path.stem}{OUTPUT_SUFFIX}.png"
-        if not imwrite(out, render_heatmap(img, pts)):
+        if not imwrite(out, render_heatmap(img, xy)):
             notes.append(f"{path.name}: 保存に失敗: {out}")
             continue
         outputs.append(out)

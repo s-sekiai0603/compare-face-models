@@ -15,8 +15,12 @@ class ExtractWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, videos: list[VideoInfo], output_root: Path, interval_sec: float,
-                 estimate_foot: bool = False):
+                 estimate_foot: bool = False, fisheye_correct: bool = False, camera_dir: str = "",
+                 inputs: dict | None = None):
         super().__init__()
+        self.fisheye_correct = fisheye_correct
+        self.camera_dir = camera_dir
+        self.inputs = inputs
         self.videos = videos
         self.output_root = output_root
         self.interval_sec = interval_sec
@@ -31,7 +35,8 @@ class ExtractWorker(QThread):
             results, run_dir = run_extraction(
                 self.videos, self.output_root, self.interval_sec,
                 status=self.status.emit, progress=self.progress.emit, is_cancelled=lambda: self._cancel,
-                estimate_foot=self.estimate_foot)
+                estimate_foot=self.estimate_foot, fisheye_correct=self.fisheye_correct,
+                camera_dir=self.camera_dir, inputs=self.inputs)
             self.done.emit(results, str(run_dir), self._cancel)
         except Exception as e:
             self.failed.emit(str(e))

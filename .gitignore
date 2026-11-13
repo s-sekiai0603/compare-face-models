@@ -11,6 +11,7 @@ settings.json
 verify_face_size_screen_setting.json
 face_size_map_screen_setting.json
 camera_projection_screen_setting.json
+distance_pose_chart_screen_setting.json
 # 検証エビデンス（Excel・抽出した顔画像。サイズが大きいため Git 管理外）
 reid_evidence/
 face_evidence/

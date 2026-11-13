@@ -169,16 +169,40 @@ def write_misidentify_log(path: Path, entries: list[GalleryEntry], nontargets: l
     return n_pairs
 
 
+def _assign_distances(entries: list[GalleryEntry], camera_dir: Path, image_dir: Path | None = None) -> str:
+    """各画像の distance_m をカメラ設定（<カメラID>.json）と足元の座標から設定する。ログ用の要約を返す。"""
+    from ..camera.distance import CameraDistance
+
+    if not camera_dir.is_dir():
+        raise ValueError(f"カメラ設定フォルダが見つかりません: {camera_dir}")
+    if image_dir is not None and not image_dir.is_dir():
+        raise ValueError(f"カメラ画像フォルダが見つかりません: {image_dir}")
+    cam = CameraDistance(camera_dir, image_dir)
+    n_ok = 0
+    for e in entries:
+        # 魚眼補正して抽出した結果（抽出履歴で判定）は足元が補正済みの座標なので、歪み補正を重ねない
+        e.distance_m = cam.distance_m(e.camera_id, e.foot_xy, corrected=e.fisheye_lambda is not None)
+        n_ok += e.distance_m is not None
+    note = f"{n_ok} / {len(entries)} 枚"
+    if cam.errors:
+        note += " / 算出できないカメラ: " + "、".join(f"{k}（{v}）" for k, v in sorted(cam.errors.items()))
+    return note
+
+
 # ---- 実行 ----
 def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_name: str, landmark_name: str,
                          gate_filter: GateFilter | None = None, mode: str = "similarity", gallery_dir: Path | str | None = None,
                          progress=lambda s: None, echo=print, grayscale: bool = False,
-                         align168: bool = False) -> tuple[Path, PhaseLogger]:
+                         align168: bool = False, camera_dir: Path | str | None = None,
+                         camera_image_dir: Path | str | None = None) -> tuple[Path, PhaseLogger]:
     """顔サイズ別精度検証のレポートを出力する（GUI 非依存）。mode は OUTPUT_MODES のキー。
     grayscale=True: アライン後の顔画像に明るさ補正（CLAHE）を掛け、グレースケール化してから特徴量化する（比較対象・検証対象とも。
     キャッシュは別ファイル）。
     align168=True: アラインを 112×112 ではなく 168×168 で行い、特徴量モデルへ渡す直前に 112×112 へ縮小する（キャッシュは別ファイル）。
-    誤識別の枚数レポート（misidentify / both）には比較対象フォルダ gallery_dir が必要。"""
+    誤識別の枚数レポート（misidentify / both）には比較対象フォルダ gallery_dir が必要。
+    camera_dir: カメラ設定フォルダ（射影変換設定抽出画面の出力先。<カメラID>.json）。camera_image_dir: カメラ画像フォルダ（<カメラID>.png。距離の算出に使う
+    画像サイズをここの画像から取る。指定しなければ camera_dir 内から探す）。指定すると、各画像のカメラIDと足元の座標から
+    カメラ直下までの距離を算出してレポートの「距離」に出す（指定なし・算出できない画像は「-」）。"""
     from .verify_face_size_excel import VerifyConditions, build_verify_face_size_report
 
     want_sim, want_mis, want_rank = runs_similarity_report(mode), runs_misidentify_report(mode), runs_rank_report(mode)
@@ -210,6 +234,10 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
             raise ValueError("追跡IDフォルダに有効な顔画像(_face.jpg)が見つかりません（無効・採用基準外を除く）")
         rec.note = (f"画像 {len(entries)} 件 / 追跡ID {len({e.track_key for e in entries})} 件"
                     f" / 無効画像 {sum(1 for e in all_entries if e.invalid)} 件・採用基準外 {n_gate} 件を除外")
+    if camera_dir is not None and str(camera_dir).strip():
+        with log.phase("カメラ設定からの距離の算出") as rec:
+            rec.note = _assign_distances(entries, Path(camera_dir),
+                                         Path(camera_image_dir) if camera_image_dir and str(camera_image_dir).strip() else None)
     nontargets: list[GalleryEntry] = []
     nt_emb = None
     cache = None

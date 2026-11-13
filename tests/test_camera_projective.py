@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from compare_face.core.camera.projective import (
-    ProjectionError, calibrate_focal, clip_line_to_rect, compute_projection, load_config, resolve_sides, save_config,
+    ProjectionError, clip_line_to_rect, compute_projection, focal_for_nadir, load_config, resolve_sides, save_config,
 )
 
 W, H = 1920, 1080
@@ -45,30 +45,36 @@ def test_slant_distance_includes_height():
     assert proj.slant_distance_m(xy) == pytest.approx(np.sqrt(2.0**2 + 8.0**2 + HEIGHT**2), rel=0.01)
 
 
-def test_calibrate_focal_with_measured_distance():
+def test_focal_for_nadir_recovers_focal_from_dragged_position():
     a, b = 4.0, 2.0
     pts = _rect(-1.0, 3.0, a, b, yaw=0.2)
-    # 4 点にクリックずれがあり、自動推定のカメラ位置が真値からずれている状況
-    noisy = [(x + dx, y + dy) for (x, y), (dx, dy) in zip(pts, [(4, -3), (-3, 5), (2, 2), (-5, -4)])]
-    ref = _project(2.0, 8.0, yaw=0.2)
-    true_d = np.hypot(2.0, 8.0)
-    auto = compute_projection(noisy, a, b, (W, H))
-    fixed = calibrate_focal(noisy, a, b, (W, H), ref, true_d)
-    assert fixed.distance_m(ref) == pytest.approx(true_d, abs=1e-3)
-    assert abs(fixed.distance_m(ref) - true_d) <= abs(auto.distance_m(ref) - true_d)
-    with pytest.raises(ProjectionError):
-        calibrate_focal(noisy, a, b, (W, H), ref, 0.0)
-    with pytest.raises(ProjectionError):
-        calibrate_focal(noisy, a, b, (W, H), ref, 1e6)
+    for f_true in (900.0, 1300.0, 1800.0):
+        target = compute_projection(pts, a, b, (W, H), focal_px=f_true).camera_xy
+        assert focal_for_nadir(pts, a, b, (W, H), target) == pytest.approx(f_true, rel=1e-3)
+    # 曲線から外れた位置へドラッグしても、曲線上の最も近い点（= その点の近くの焦点距離）に投影される
+    on = compute_projection(pts, a, b, (W, H), focal_px=1300.0).camera_xy
+    f = focal_for_nadir(pts, a, b, (W, H), (on[0] + 200.0, on[1] + 50.0))
+    got = compute_projection(pts, a, b, (W, H), focal_px=f).camera_xy
+    assert 1300.0 < f < 1500.0 and got[1] > on[1]                      # 下へ動かした分だけ焦点距離が大きくなる
+    # ドラッグ位置が範囲外でも、範囲の端の焦点距離（4 点からの推定値の 0.2〜5 倍）で止まる
+    base = compute_projection(pts, a, b, (W, H)).focal_px
+    assert focal_for_nadir(pts, a, b, (W, H), (960.0, 1e7)) == pytest.approx(5.0 * base, rel=0.05)
 
 
-def test_config_roundtrip_with_calibration(tmp_path):
+def test_config_roundtrip(tmp_path):
     p = tmp_path / "cam1.json"
     pts = [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)]
-    save_config(p, "cam1.png", pts, 4.0, 2.0, "long", (1.0, 2.0), focal_px=900.0, ref_xy=(10.0, 20.0), measured_m=5.5)
-    assert load_config(p)["calibration"] == {"focal_px": 900.0, "ref_xy": (10.0, 20.0), "measured_m": 5.5}
     save_config(p, "cam1.png", pts, 4.0, 2.0, "long", (1.0, 2.0))
-    assert load_config(p)["calibration"] is None
+    cfg = load_config(p)
+    assert cfg["calibration"] is None and cfg["points"] == pts and cfg["camera_xy"] == (1.0, 2.0)
+    # カメラ設置座標をドラッグして補正したときの焦点距離（calibration.focal_px）。古い版の実測補正で保存した設定も同じ形で読める
+    save_config(p, "cam1.png", pts, 4.0, 2.0, "long", (1.0, 2.0), focal_px=1234.5)
+    assert load_config(p)["calibration"] == {"focal_px": 1234.5}
+    import json
+    d = json.loads(p.read_text(encoding="utf-8"))
+    d["calibration"] = {"focal_px": 800.0, "ref_xy": [1.0, 2.0], "measured_m": 3.0}
+    p.write_text(json.dumps(d), encoding="utf-8")
+    assert load_config(p)["calibration"] == {"focal_px": 800.0}
 
 
 def test_horizon_from_vanishing_points(monkeypatch):
