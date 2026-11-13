@@ -154,6 +154,11 @@ DISTANCE_POSE_CHART_DEFAULTS = {
     "viewer_icon_order": [],    # ビューアの対象のアイコンの並び順（ファイル名。上ほど手前）
     "viewer_excluded_colors": [],   # ビューアで外した色の段階の番号
     "viewer_excluded_icons": [],    # ビューアで外したアイコンのファイル名
+    "summary_excel_path": "",       # 集計画面の Excel（空 = 「excel_path」を初期値にする）
+    "summary_d_min": 0.0,           # 集計画面の距離範囲の下限(m)
+    "summary_d_max": 10.0,          # 集計画面の距離範囲の上限(m)
+    "summary_excluded_colors": [],  # 集計画面で外した色の段階の番号
+    "summary_excluded_icons": [],   # 集計画面で外したアイコンのファイル名
 }
 
 

@@ -32,7 +32,7 @@ from openpyxl.drawing.xdr import XDRPoint2D, XDRPositiveSize2D
 
 from ..common.settings import PROJECT_ROOT
 from .verify_face_size_excel import (
-    _COUNT_LEGEND, MAX_COUNT_BIN, FIRST_COL, FIRST_ROW, INFO_FIRST_ROW, INFO_SHEET_NAME, MAX_COUNT_BIN, MISIDENTIFY_SHEET_NAME, count_bin,
+    _COUNT_LEGEND, MAX_COUNT_BIN, FIRST_COL, FIRST_ROW, INFO_FIRST_ROW, INFO_SHEET_NAME, MAX_COUNT_BIN, MISIDENTIFY_SHEET_NAME, SHEET_NAME as SIMILARITY_SHEET_NAME, count_bin,
     count_bin_label,
     count_fill)
 
@@ -159,6 +159,7 @@ class ChartPoint:
     h_dir: str = ""     # 横の画像の顔の向き（左右の振り分けに使う）
     cam_v: str = ""     # 縦の画像のカメラID
     cam_h: str = ""     # 横の画像のカメラID
+    sim: float | None = None    # 縦の画像と横の画像の類似度（類似度まとめシート。読めなければ None）
 
 
 @dataclass
@@ -263,6 +264,18 @@ def read_chart_data(xlsx: Path | str) -> ChartData:
     cam_row, cam_col = row_of.get("カメラID"), col_of.get("カメラID")
     hor_cam = [str(ws.cell(row=cam_row, column=FIRST_COL + j).value or "").strip() if cam_row else "" for j in range(n_cols)]
     ver_cam = [str(ws.cell(row=FIRST_ROW + i, column=cam_col).value or "").strip() if cam_col else "" for i in range(n_rows)]
+    wss = wbv[SIMILARITY_SHEET_NAME] if SIMILARITY_SHEET_NAME in wbv.sheetnames else None
+
+    def similarity(i: int, j: int) -> float | None:
+        """類似度シートの縦 i × 横 j の類似度。左下半分（i > j）にしか値が無いので、右上半分は対称の位置（j, i）で補完する。"""
+        if wss is None:
+            return None
+        for a, b in ((max(i, j), min(i, j)), (min(i, j), max(i, j))):
+            v = wss.cell(row=FIRST_ROW + a, column=FIRST_COL + b).value
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+        return None
+
     data = ChartData(n_images=max(n_rows, n_cols), ver=ver, hor=hor, ver_cam=ver_cam, hor_cam=hor_cam)
     data.no_distance = sum(1 for d, _ in ver if d is None)
     data.no_direction = sum(1 for _, o in ver if o is None)
@@ -279,7 +292,7 @@ def read_chart_data(xlsx: Path | str) -> ChartData:
             if rgb is None:
                 data.no_fill += 1
                 continue
-            data.points.append(ChartPoint(dx, dy, ICON_FILES[frozenset((oy, ox))], rgb, ox, ver_cam[i], hor_cam[j]))
+            data.points.append(ChartPoint(dx, dy, ICON_FILES[frozenset((oy, ox))], rgb, ox, ver_cam[i], hor_cam[j], similarity(i, j)))
     return data
 
 

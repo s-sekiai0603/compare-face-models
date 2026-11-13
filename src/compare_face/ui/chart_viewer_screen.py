@@ -19,6 +19,7 @@ from ..core.report.chart_png_viewer import (
     ALL_CAMERAS, ChartOverlay, ChartPngIndex, camera_display, overlay_png_path, scan_chart_pngs, select_paths, write_png,
 )
 from ..core.report.distance_pose_chart import COLOR_GROUPS, ICON_DIR, color_group_rgb, icon_choices
+from .chart_summary_screen import ChartSummaryScreen
 from .widgets import add_check_list, add_path_row, checked_values, fixed_label, item_values, swatch_icon
 
 TITLE = "チャート(PNG)確認"
@@ -189,7 +190,14 @@ class ChartViewerScreen(QWidget):
         self.btn_apply = QPushButton("条件確定（表示を更新）")
         self.btn_apply.setToolTip("上の条件（出力対象・対象カメラ・対象の色・対象のアイコン・並び順）で PNG を重ねて表示する。条件を変えただけでは表示は変わらない")
         self.btn_apply.clicked.connect(self._refresh)
-        side.addWidget(self.btn_apply)
+        self.btn_summary = QPushButton("集計画面")
+        self.btn_summary.setToolTip("距離・向き・精度分析の Excel を、指定した距離の範囲で集計する画面を開く")
+        self.btn_summary.clicked.connect(self._open_summary)
+        self._summary = None
+        arow = QHBoxLayout()
+        arow.addWidget(self.btn_apply, 1)
+        arow.addWidget(self.btn_summary)
+        side.addLayout(arow)
         self.busy_bar = QProgressBar()      # 処理中だけ出す。枚数が分かるまでは動き続ける表示（範囲 0〜0）
         self.busy_bar.setRange(0, 0)
         self.busy_bar.setTextVisible(True)
@@ -225,6 +233,11 @@ class ChartViewerScreen(QWidget):
             self.settings["viewer_dir"] = d
             self._persist()
             self._rescan()
+
+    def _open_summary(self) -> None:
+        """集計画面を開く（Excel の初期値は距離・向き・精度分析画面の Excel。設定は共有）。"""
+        self._summary = ChartSummaryScreen(self.settings, self._save)
+        self._summary.show()
 
     def _export(self) -> None:
         """いま表示している重ねた画像を、保存先を指定するダイアログで決めた場所に PNG で保存する。

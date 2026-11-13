@@ -4,10 +4,10 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
-    QRadioButton, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QTableWidget, QVBoxLayout, QWidget,
 )
 
 from ..core.pose import POSE_OPTIONS, get_pose_estimator
@@ -116,6 +116,41 @@ def add_check_list(parent: QVBoxLayout, label: str, tip: str, height: int, items
     if on_changed is not None:
         lw.itemChanged.connect(lambda _item: on_changed())
     return lw
+
+
+def table_to_tsv(table: QTableWidget, selected_only: bool = False, header: bool = True) -> str:
+    """表をタブ区切りの文字列にする（Excel に貼り付けられる）。selected_only=True は選択範囲の外接矩形だけ（選択が無ければ全体）。"""
+    rows, cols = range(table.rowCount()), range(table.columnCount())
+    if selected_only:
+        sel = table.selectedIndexes()
+        if sel:
+            rows = range(min(i.row() for i in sel), max(i.row() for i in sel) + 1)
+            cols = range(min(i.column() for i in sel), max(i.column() for i in sel) + 1)
+            header = False      # 選択範囲のコピーは見出しを含めない（セルだけを貼り付けられるように）
+    lines = []
+    if header:
+        lines.append("\t".join(table.horizontalHeaderItem(c).text() if table.horizontalHeaderItem(c) else "" for c in cols))
+    for r in rows:
+        lines.append("\t".join((table.item(r, c).text() if table.item(r, c) else "") for c in cols))
+    return "\n".join(lines)
+
+
+class CopyTable(QTableWidget):
+    """範囲選択して Ctrl+C で、選択範囲をタブ区切りでクリップボードへ送る表（Excel に貼り付けられる）。"""
+
+    def __init__(self, headers: list[str]):
+        super().__init__(0, len(headers))
+        self.setHorizontalHeaderLabels(headers)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.horizontalHeader().setStretchLastSection(True)
+
+    def keyPressEvent(self, e) -> None:
+        if e.matches(QKeySequence.Copy):
+            QApplication.clipboard().setText(table_to_tsv(self, selected_only=True))
+            e.accept()
+            return
+        super().keyPressEvent(e)
 
 
 def pose_registry(note: str) -> dict:
