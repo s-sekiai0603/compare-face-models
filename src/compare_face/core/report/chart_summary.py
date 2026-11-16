@@ -110,9 +110,10 @@ def summarize(points: list[ChartPoint], colors: Collection[int], icons: Collecti
     share = SummaryRow(section, "総数", "全体に対するデータ件数・割合", len(scoped), (len(scoped) / len(points)) if points else None,
                       sim=similarity_stats(scoped))
     block = _block(section, scoped, colors, icons)
-    # 範囲内の総数の行の下に、範囲内のうち対象の色に合致するデータの割合の行を置く（件数 = 対象の色の件数の合計）
-    matched = sum(r.count for r in block if r.kind == "対象の色")
-    in_colors = set(colors)
-    cond = SummaryRow(section, "総数", "集計距離範囲内で指定条件に合致するデータ", matched, (matched / len(scoped)) if scoped else None,
-                      sim=similarity_stats([p for p in scoped if color_group(p.rgb) in in_colors]))
+    # 範囲内の総数の行の下に、指定条件に合致するデータの行を置く。
+    # 指定条件 = （チェックした色のどれか）かつ（チェックしたアイコンのどれか）
+    in_colors, in_icons = set(colors), set(icons)
+    hit = [p for p in scoped if color_group(p.rgb) in in_colors and p.icon in in_icons]
+    cond = SummaryRow(section, "総数", "集計距離範囲内で指定条件に合致するデータ", len(hit), (len(hit) / len(scoped)) if scoped else None,
+                      sim=similarity_stats(hit))
     return _block("全体", points, colors, icons) + [share, block[0], cond] + block[1:]
