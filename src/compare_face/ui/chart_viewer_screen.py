@@ -11,12 +11,12 @@ from typing import Callable
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QFileDialog, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QButtonGroup, QComboBox, QFileDialog, QGroupBox, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
 from ..core.report.chart_png_viewer import (
-    ALL_CAMERAS, ChartOverlay, ChartPngIndex, camera_display, overlay_png_path, scan_chart_pngs, select_paths, write_png,
+    ALL_CAMERAS, HEATMAP_CACHE_DIR, ChartOverlay, ChartPngIndex, HeatmapOverlay, camera_display, on_white, overlay_png_path, scan_chart_pngs, select_paths, write_png,
 )
 from ..core.report.distance_pose_chart import COLOR_GROUPS, ICON_DIR, color_group_rgb, icon_choices
 from .chart_summary_screen import ChartSummaryScreen
@@ -82,7 +82,7 @@ class _ComposeWorker(QThread):
     failed = Signal(str)
     progress = Signal(int, int)    # (済んだ枚数, 今回重ねる枚数)
 
-    def __init__(self, overlay: ChartOverlay, paths: list[Path]):
+    def __init__(self, overlay, paths: list[Path]):
         super().__init__()
         self.overlay, self.paths = overlay, paths
 
@@ -110,7 +110,9 @@ class ChartViewerScreen(QWidget):
         self.settings = settings if settings is not None else {}
         self._save = save
         self.index = ChartPngIndex({})
-        self.overlay = ChartOverlay()
+        self.icon_overlay = ChartOverlay()
+        self.heat_overlay = HeatmapOverlay()
+        self.overlay = self.icon_overlay      # 表示中のモードの合成器
         self._worker: _ComposeWorker | None = None
         self._pending = False
         self._fit_next = True
@@ -187,8 +189,25 @@ class ChartViewerScreen(QWidget):
         order_hint.setWordWrap(True)
         side.addWidget(order_hint)
 
+        mode_box = QGroupBox("表示モード")
+        mode_lay = QHBoxLayout(mode_box)
+        self.rb_icon = QRadioButton("アイコン表示")
+        self.rb_icon.setToolTip("PNG を重ねてアイコンをそのまま表示する")
+        self.rb_heat = QRadioButton("ヒートマップ表示")
+        self.rb_heat.setToolTip("重ねた PNG のアイコンの位置・色から、アイコンを消してヒートマップで表示する"
+                                "（背面に隠れて見えないアイコンも色に反映する。色 = 周辺の色の段階の平均、濃さ = 密集具合）")
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self.rb_icon)
+        mode_group.addButton(self.rb_heat)
+        (self.rb_heat if self.settings.get("viewer_display_mode") == "heatmap" else self.rb_icon).setChecked(True)
+        mode_lay.addWidget(self.rb_icon)
+        mode_lay.addWidget(self.rb_heat)
+        mode_lay.addStretch()
+        side.addWidget(mode_box)
+        self.rb_heat.toggled.connect(lambda _c: self._mark_dirty())
+
         self.btn_apply = QPushButton("条件確定（表示を更新）")
-        self.btn_apply.setToolTip("上の条件（出力対象・対象カメラ・対象の色・対象のアイコン・並び順）で PNG を重ねて表示する。条件を変えただけでは表示は変わらない")
+        self.btn_apply.setToolTip("上の条件（出力対象・対象カメラ・対象の色・対象のアイコン・並び順・表示モード）で PNG を重ねて表示する。条件を変えただけでは表示は変わらない")
         self.btn_apply.clicked.connect(self._refresh)
         self.btn_summary = QPushButton("集計画面")
         self.btn_summary.setToolTip("距離・向き・精度分析の Excel を、指定した距離の範囲で集計する画面を開く")
@@ -252,7 +271,7 @@ class ChartViewerScreen(QWidget):
         if not chosen:
             return
         try:
-            path = write_png(self.overlay.image, chosen)
+            path = write_png(on_white(self.overlay.image), chosen)
         except OSError as e:
             QMessageBox.critical(self, TITLE, f"保存できませんでした:\n{e}")
             return
@@ -324,6 +343,8 @@ class ChartViewerScreen(QWidget):
         name = self.excel_combo.currentText()
         colors, _ = checked_values(self.color_list)
         icons, _ = checked_values(self.icon_list)
+        self.heat_overlay.cache_dir = Path(self.dir_edit.text()) / HEATMAP_CACHE_DIR if self.dir_edit.text() else None
+        self.overlay = self.heat_overlay if self.rb_heat.isChecked() else self.icon_overlay
         paths, missing = select_paths(self.index, name, self._selected_cameras(), colors, icons)     # colors / icons は上にあるものほど手前
         if not self.index.files:
             self.status.setText("この格納先に、組合せごとに出力したチャートの PNG がありません。")
@@ -366,7 +387,7 @@ class ChartViewerScreen(QWidget):
         if self._pending:
             return      # 選択が変わっているので、この結果は捨てて _on_thread_finished で作り直す
         self.btn_export.setEnabled(im is not None)
-        self.view.set_image(pil_to_qimage(im) if im is not None else None, fit=self._fit_next and im is not None)
+        self.view.set_image(pil_to_qimage(on_white(im)) if im is not None else None, fit=self._fit_next and im is not None)
         if im is not None:
             self._fit_next = False
         self.status.setText(self.status.text().replace("　合成中...", ""))
@@ -388,6 +409,7 @@ class ChartViewerScreen(QWidget):
     def _persist_selection(self, colors: list, icons: list) -> None:
         self.settings["viewer_excluded_colors"] = [g for g in range(len(COLOR_GROUPS)) if g not in colors]
         self.settings["viewer_excluded_icons"] = [f for _, f in icon_choices() if f not in icons]
+        self.settings["viewer_display_mode"] = "heatmap" if self.rb_heat.isChecked() else "icon"
         self.settings["viewer_color_order"] = item_values(self.color_list)
         self.settings["viewer_icon_order"] = item_values(self.icon_list)
         self._persist()

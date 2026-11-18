@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .distance_pose_chart import COLOR_GROUPS, PLOT, icon_choices, safe_label
+from .distance_pose_chart import COLOR_GROUPS, ICON_PX, PLOT, color_group_rgb, icon_choices, safe_label
 
 CHART_MARK = "_チャート_"
 ALL_CAMERAS = "すべてのカメラ"
@@ -104,6 +104,14 @@ def overlay_png_path(out_dir: Path | str, excel_name: str, camera: str, now: dat
     return Path(out_dir) / ("_".join(parts) + ".png")
 
 
+def on_white(image):
+    """透過した画像（RGBA）を白い背景に重ねた画像（RGBA）。元の画像は変えない。"""
+    from PIL import Image
+    bg = Image.new("RGBA", image.size, (255, 255, 255, 255))
+    bg.alpha_composite(image)
+    return bg
+
+
 def write_png(image, path: Path | str) -> Path:
     """画像（Pillow）を path に PNG で保存して、そのパスを返す（拡張子が .png でなければ付ける。フォルダが無ければ作る。日本語パス可）。"""
     import io
@@ -120,6 +128,145 @@ def write_png(image, path: Path | str) -> Path:
 def save_overlay_png(image, out_dir: Path | str, excel_name: str, camera: str, now: datetime | None = None) -> Path:
     """重ねた画像を既定のファイル名（overlay_png_path）で out_dir に PNG 保存して、そのパスを返す。"""
     return write_png(image, overlay_png_path(out_dir, excel_name, camera, now))
+
+
+HEATMAP_CACHE_DIR = ".heatmap_cache"      # PNG の格納先の中に、作成したヒートマップの PNG を保存するフォルダ（scan_chart_pngs は直下のファイルだけ見るので対象外）
+HEAT_DOWNSCALE = 4          # ヒートマップ計算時の縮小率（プロット領域を 1/4 にして密度を求め、最後に拡大する）
+HEAT_SIGMA_ICONS = 1.6      # ぼかしの大きさ（アイコン幅に対する倍率）。点の密集具合をなめらかにする
+HEAT_MAX_ALPHA = 0.92
+HEAT_ALPHA_GAMMA = 0.45     # 小さいほど、点が少ない所も濃く出る
+_MIN_SATURATION = 40        # アイコンの色づいた部分の判定（max - min）。グリッド線・文字は無彩色なので入らない
+
+
+def _icon_mask(im):
+    """チャート PNG のプロット領域の中で、アイコンの色づいた部分の真偽配列と、その領域の座標 (x0, y0, x1, y1)。
+    グリッド線・文字・枠は無彩色なので除かれる。重なって背面に隠れたアイコンは、PNG が 1 色 × 1 アイコンごとに別なので全て拾える。"""
+    import numpy as np
+    a = np.asarray(im)
+    h, w = a.shape[:2]
+    px, py, pw, ph = PLOT
+    x0, y0, x1, y1 = int(px * w), int(py * h), int((px + pw) * w), int((py + ph) * h)
+    c = a[y0:y1, x0:x1].astype(np.int16)
+    sat = c[..., :3].max(axis=-1) - c[..., :3].min(axis=-1)
+    return (c[..., 3] >= 128) & (sat >= _MIN_SATURATION), (x0, y0, x1, y1)
+
+
+def _heat_palette(levels: "np.ndarray"):
+    """色の段階（0〜6 の連続値）→ RGB（float32, N×3）。段階ごとの色（緑 → 黄 → 橙 → 赤 → 濃赤）の間を補間する。"""
+    import numpy as np
+    stops = np.array([color_group_rgb(g) for g in range(len(COLOR_GROUPS))], np.float32)
+    t = np.clip(levels, 0, len(stops) - 1)
+    k = np.minimum(t.astype(np.int32), len(stops) - 2)
+    f = (t - k)[..., None]
+    return stops[k] * (1 - f) + stops[k + 1] * f
+
+
+class HeatmapOverlay:
+    """PNG 内のアイコンの位置・色から、アイコンを消したヒートマップ画像（RGBA）を作る（ChartOverlay と同じ使い方）。
+    PNG は 1 色 × 1 アイコンごとに別ファイルなので、重ねたときに背面で見えなくなるアイコンも全て数える。
+    色 = 周辺の点の色の段階の平均（緑 → 赤）、濃さ = 点の密集具合。軸・グリッド・凡例は最初の PNG のものを使う。"""
+
+    def __init__(self, loader=load_rgba, cache_dir: Path | str | None = None):
+        self._loader = loader
+        self.cache_dir = Path(cache_dir) if cache_dir else None    # 作成したヒートマップの PNG の保存先（None = 保存しない）
+        self._cache: dict[Path, tuple] = {}   # パス → (縮小したアイコンの割合, 色の段階, プロット領域の座標)
+        self._image = None
+        self._frame_path: Path | None = None
+        self._frame = None
+
+    @property
+    def image(self):
+        return self._image
+
+    def _level(self, path: Path) -> int:
+        parsed = parse_chart_png_name(path.name)
+        return parsed[1][1] if parsed else 0
+
+    def cache_path(self, paths: list[Path]) -> Path | None:
+        """この PNG の組合せ（順序は関係ない）のヒートマップを保存するパス。PNG の更新日時・サイズ・ヒートマップの設定が変わると別のパスになる。"""
+        import hashlib
+        if self.cache_dir is None:
+            return None
+        parts = [f"v1|{HEAT_DOWNSCALE}|{HEAT_SIGMA_ICONS}|{HEAT_MAX_ALPHA}|{HEAT_ALPHA_GAMMA}|{_MIN_SATURATION}"]
+        for p in sorted(Path(x) for x in paths):
+            st = p.stat()
+            parts.append(f"{p.name}|{st.st_size}|{st.st_mtime_ns}")
+        return self.cache_dir / (hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest() + ".png")
+
+    def compose(self, paths: list[Path], progress=None):
+        """ヒートマップ画像。同じ条件で作った保存済みの PNG があればそれを読む。なければ作って保存する。"""
+        wanted = [Path(p) for p in paths]
+        if not wanted:
+            self._image = None
+            return None
+        saved = self.cache_path(wanted)
+        if saved is not None and saved.is_file():
+            try:
+                self._image = self._loader(saved)
+                if progress is not None:
+                    progress(len(wanted), len(wanted))
+                return self._image
+            except Exception:
+                pass      # 壊れていれば作り直す
+        self._image = self._build(wanted, progress)
+        if saved is not None and self._image is not None:
+            try:
+                write_png(self._image, saved)
+            except OSError:
+                pass      # 保存できなくても表示はできる
+        return self._image
+
+    def _build(self, wanted: list[Path], progress=None):
+        import cv2
+        import numpy as np
+        from PIL import Image
+        if progress is not None:
+            progress(0, len(wanted))
+        density = weighted = None
+        for n, p in enumerate(wanted, 1):
+            if p not in self._cache:
+                im = self._loader(p)
+                mask, box = _icon_mask(im)
+                frac = cv2.resize(mask.astype(np.float32), (max(mask.shape[1] // HEAT_DOWNSCALE, 1), max(mask.shape[0] // HEAT_DOWNSCALE, 1)),
+                                  interpolation=cv2.INTER_AREA)
+                self._cache[p] = (frac, self._level(p), box)
+            frac, level, box = self._cache[p]
+            if density is None:
+                density, weighted, first_box = np.zeros_like(frac), np.zeros_like(frac), box
+            if frac.shape != density.shape:
+                frac = cv2.resize(frac, (density.shape[1], density.shape[0]), interpolation=cv2.INTER_AREA)
+            density += frac
+            weighted += frac * level
+            if progress is not None:
+                progress(n, len(wanted))
+        # 枠（軸・グリッド・凡例）: 最初の PNG からプロット領域内のアイコンを消したもの
+        if self._frame is None or self._frame_path != wanted[0]:
+            im0 = self._loader(wanted[0])
+            mask, (fx0, fy0, fx1, fy1) = _icon_mask(im0)
+            mask = cv2.dilate(mask.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+            arr = np.array(im0)
+            region = arr[fy0:fy1, fx0:fx1]
+            region[mask] = 0
+            self._frame, self._frame_path = Image.fromarray(arr, "RGBA"), wanted[0]
+        frame = self._frame
+        x0, y0, x1, y1 = first_box
+        sigma = max(HEAT_SIGMA_ICONS * ICON_PX / HEAT_DOWNSCALE, 1.0)
+        d = cv2.GaussianBlur(density, (0, 0), sigma)
+        w = cv2.GaussianBlur(weighted, (0, 0), sigma)
+        peak = float(np.percentile(d[d > 1e-6], 99)) if (d > 1e-6).any() else 0.0
+        if peak <= 0:
+            return frame.copy()
+        mean_level = np.where(d > 1e-6, w / np.maximum(d, 1e-6), 0)
+        alpha = np.clip(d / peak, 0, 1) ** HEAT_ALPHA_GAMMA * HEAT_MAX_ALPHA
+        alpha[d < peak * 1e-3] = 0
+        rgb = _heat_palette(mean_level)
+        heat = np.dstack([rgb, alpha * 255]).astype(np.float32)
+        heat = cv2.resize(heat, (x1 - x0, y1 - y0), interpolation=cv2.INTER_LINEAR)
+        canvas = np.zeros((frame.height, frame.width, 4), np.uint8)
+        canvas[y0:y1, x0:x1] = np.clip(heat, 0, 255).astype(np.uint8)
+        out = Image.fromarray(canvas, "RGBA")
+        out.alpha_composite(frame)
+        return out
 
 
 class ChartOverlay:
