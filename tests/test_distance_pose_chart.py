@@ -78,11 +78,11 @@ def _expected_dist():
 
 
 def _set_directions(path, dirs):
-    """対象画像情報の「顔の向き」（G 列）に値を入れる（openpyxl で保存し直すのでセル内画像は失われる = データ読取のテスト用）。"""
+    """対象画像情報の「顔の向き」（H 列）に値を入れる（openpyxl で保存し直すのでセル内画像は失われる = データ読取のテスト用）。"""
     wb = openpyxl.load_workbook(path)
     ws = wb[INFO_SHEET_NAME]
     for r, d in enumerate(dirs, start=3):
-        ws.cell(row=r, column=7, value=d)
+        ws.cell(row=r, column=8, value=d)
     wb.save(path)
 
 
@@ -102,7 +102,7 @@ def test_read_chart_data_resolves_via_info_sheet(tmp_path, monkeypatch):
     # 色 = 誤識別数シートの縦 i × 横 j のセルの背景色。(i=0, j=2) と (i=2, j=0)
     ws = openpyxl.load_workbook(out)[MISIDENTIFY_SHEET_NAME]
     rgb = lambda r, c: tuple(int(ws.cell(row=r, column=c).fill.fgColor.rgb[-6:][k:k + 2], 16) for k in (0, 2, 4))
-    assert data.points[0].rgb == rgb(16, 15) and data.points[1].rgb == rgb(18, 13)
+    assert data.points[0].rgb == rgb(17, 16) and data.points[1].rgb == rgb(19, 14)
 
 
 def test_settings_roundtrip(tmp_path):

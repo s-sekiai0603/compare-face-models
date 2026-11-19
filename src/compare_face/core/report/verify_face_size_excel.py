@@ -1,12 +1,12 @@
 """顔サイズ別精度検証の Excel 出力（dev_work\\比較結果類似度.xlsx「比較結果類似度まとめ【サンプル】」「比較結果誤識別数まとめ【サンプル】」のレイアウト）。
 
-画像 N 枚を顔 bbox サイズ順（呼び出し側で並べ済み）に、5〜15 行目の M 列より右（横）と B〜L 列の 16 行目より下（縦）に同じ並びで置く。
-カメラID・映像ファイル名・追跡ID・画像ファイル名・画像サイズは値、顔画像・顔の向き・顔の信頼度・足元の座標・距離は「対象画像情報」シートを引く VLOOKUP の式
+画像 N 枚を顔 bbox サイズ順（呼び出し側で並べ済み）に、5〜16 行目の N 列より右（横）と B〜M 列の 17 行目より下（縦）に同じ並びで置く。
+カメラID・映像ファイル名・追跡ID・画像ファイル名・画像サイズは値、顔画像・顔の角度・顔の向き・顔の信頼度・足元の座標・距離は「対象画像情報」シートを引く VLOOKUP の式
 （距離 = カメラ設定ファイルから算出した、カメラ直下から足元までの地面上の距離(m)。設定が無い画像は「-」）。
 キー（カメラID|映像ファイル名|追跡ID|画像ファイル名）は 4 行目（横）と A 列（縦）の式。
 類似度シート: 縦 i × 横 j のうち i > j（左下半分）だけに類似度を出し、類似度の段階（SIM_BINS）で色を付ける（右上半分は左下と同じ値なので出さない）。
 誤識別数シート: 同じ枠の対角以外すべてに「i との類似度が j との類似度より高い非対象者の画像の数」を出し、件数の段階（count_bin）で色を付ける。
-10 行目 / G 列の「顔の向き」も同じ（対象画像情報の「顔の向き」は人手で入れる）。
+10 行目 / G 列の「顔の角度」（対象画像情報の「顔の角度」）、11 行目 / H 列の「顔の向き」も同じ（対象画像情報の「顔の向き」は人手で入れる）。
 全身画像・顔画像は「セルに画像を貼り付け」と同じ形式（リッチデータ）でセルに入れる（openpyxl は非対応なので保存後に xlsx へ書き足す）。
 シート全体のフォントは Meiryo UI（対象画像情報と 3 つのまとめシート）。"""
 from __future__ import annotations
@@ -35,8 +35,8 @@ SHEET_NAME = "比較結果類似度まとめ"
 MISIDENTIFY_SHEET_NAME = "比較結果誤識別数まとめ"
 RANK_SHEET_NAME = "比較結果順位まとめ"
 INFO_SHEET_NAME = "対象画像情報"
-FIRST_ROW = 16   # 縦側の最初の画像の行
-FIRST_COL = 13   # 横側の最初の画像の列（M）
+FIRST_ROW = 17   # 縦側の最初の画像の行（見出し行は 16 行目）
+FIRST_COL = 14   # 横側の最初の画像の列（N。行見出しは M 列）
 SHEET_FONT = "Meiryo UI"
 ADDED_COL_WIDTH = 11.38   # 追加した列（顔画像・顔の信頼度・足元の座標）の幅
 IMAGE_ROW_PT = 80         # 顔画像の行と、データの行（16 行目以降）の高さ
@@ -61,16 +61,16 @@ _COUNT_LEGEND = (0, 1, 10, 20, 50, 100, 10_000)  # 凡例に出す段階の代�
 # 順位の段階（上限, 表示名）。1 位は緑、2 位以降は段階が上がるほど 黄 → 橙 → 赤 → 濃赤。最後の段階は上限なし
 RANK_BINS = ((1, "1位"), (2, "2位"), (3, "3位"), (5, "4〜5位"), (10, "6〜10位"), (20, "11〜20位"), (50, "21〜50位"), (None, "51位以降"))
 
-# 5〜15 行目の行見出し（L 列）と、画像 1 枚の値の取り出し
-_ROW_LABELS = ("カメラID", "映像ファイル名", "追跡ID", "画像ファイル名", "顔画像", "顔の向き", "顔の信頼度", "足元の座標", "距離",
+# 5〜16 行目の行見出し（M 列）と、画像 1 枚の値の取り出し
+_ROW_LABELS = ("カメラID", "映像ファイル名", "追跡ID", "画像ファイル名", "顔画像", "顔の角度", "顔の向き", "顔の信頼度", "足元の座標", "距離",
                "画像サイズ(幅:px)", "画像サイズ(高さ:px)")
-# 15 行目の縦側見出し（B〜L 列）。並びは横側（_ROW_LABELS）と同じ
-_COL_HEADS = ("カメラ\nID", "映像\nファイル名", "追跡\nID", "画像\nファイル名", "顔画像", "顔の向き", "顔の信頼度", "足元の座標", "距離",
+# 16 行目の縦側見出し（B〜M 列）。並びは横側（_ROW_LABELS）と同じ
+_COL_HEADS = ("カメラ\nID", "映像\nファイル名", "追跡\nID", "画像\nファイル名", "顔画像", "顔の角度", "顔の向き", "顔の信頼度", "足元の座標", "距離",
               "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)")
 _FACE_K = 4   # _ROW_LABELS / _COL_HEADS の「顔画像」の位置
 # 「対象画像情報」シートの B〜N 列のうち VLOOKUP で引く列の位置（B 列 = 1）
-_LK_DIR, _LK_CONF, _LK_FOOT, _LK_DIST, _LK_FACE = 6, 9, 10, 11, 13
-_LOOKUP_LAST_COL = "N"
+_LK_ANGLE, _LK_DIR, _LK_CONF, _LK_FOOT, _LK_DIST, _LK_FACE = 6, 7, 10, 11, 12, 14
+_LOOKUP_LAST_COL = "O"
 _LOOKUP_MIN_LAST_ROW = 200   # VLOOKUP の範囲の最終行の下限（画像が多ければ広げる）
 
 
@@ -171,6 +171,11 @@ def _foot_text(e: GalleryEntry) -> str:
     return f"({round(float(f[0]))}, {round(float(f[1]))})"
 
 
+def _angle_text(e: GalleryEntry):
+    """顔の角度: 画面で選んだモデルの yaw [度]（全モデルの平均を選べばその平均。小数 1 桁の数値）。推定できていなければ「-」。"""
+    return NA if e.face_angle is None else round(float(e.face_angle), 1)
+
+
 def _dist_value(e: GalleryEntry):
     """カメラからの距離(m)。カメラ設定ファイルから算出できていない（設定フォルダ未指定・設定なし等）なら「-」。"""
     return NA if e.distance_m is None else round(float(e.distance_m), DIST_DECIMALS)
@@ -190,7 +195,7 @@ class _Lookup:
 def _matrix_values(e: GalleryEntry, key_cell: str, lookup: _Lookup | None) -> list:
     """行列シートの画像 1 枚の値（並びは _ROW_LABELS）。顔画像・顔の信頼度・足元の座標は対象画像情報シートを引く式（key_cell = キーのセル）。"""
     f = (lambda idx: lookup.formula(key_cell, idx)) if lookup is not None else (lambda idx: None)
-    return [e.camera_id, e.video_file, e.track_id, e.face_path.name, f(_LK_FACE), f(_LK_DIR), f(_LK_CONF), f(_LK_FOOT),
+    return [e.camera_id, e.video_file, e.track_id, e.face_path.name, f(_LK_FACE), f(_LK_ANGLE), f(_LK_DIR), f(_LK_CONF), f(_LK_FOOT),
             f(_LK_DIST), _px(e.face_width), _px(e.face_height)]
 
 
@@ -264,8 +269,8 @@ def _build_matrix_sheet(ws, entries: list[GalleryEntry], title: str, note: str, 
     ws.row_dimensions[head_row].height = 32.25
     for i in range(n):
         ws.row_dimensions[FIRST_ROW + i].height = IMAGE_ROW_PT
-    # 列幅 A〜L。追加した列（顔画像 F・顔の信頼度 H・足元の座標 I・距離 J）は ADDED_COL_WIDTH
-    for c, w in zip("ABCDEFGHIJKL", (3, 9, 18, 7, 28, ADDED_COL_WIDTH, 11, ADDED_COL_WIDTH, ADDED_COL_WIDTH, ADDED_COL_WIDTH, 11, 20)):
+    # 列幅 A〜M。追加した列（顔画像 F・顔の信頼度 I・足元の座標 J・距離 K）は ADDED_COL_WIDTH
+    for c, w in zip("ABCDEFGHIJKLM", (3, 9, 18, 7, 28, ADDED_COL_WIDTH, 11, 11, ADDED_COL_WIDTH, ADDED_COL_WIDTH, ADDED_COL_WIDTH, 11, 20)):
         ws.column_dimensions[c].width = w
     for j in range(n):
         ws.column_dimensions[get_column_letter(FIRST_COL + j)].width = 12
@@ -322,12 +327,12 @@ def _build_rank(ws, entries: list[GalleryEntry], ranks: np.ndarray, n_tracks: in
 
 
 # ---- 対象画像情報（サンプル「対象画像情報【サンプル】」）----
-INFO_HEADS = ("キー情報", "カメラ\nID", "映像ファイル名", "追跡\nID", "画像ファイル名", "顔の向き", "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)",
+INFO_HEADS = ("キー情報", "カメラ\nID", "映像ファイル名", "追跡\nID", "画像ファイル名", "顔の角度", "顔の向き", "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)",
               "顔の信頼度", "足元の座標", "距離", "全身画像", "顔画像")
 INFO_FIRST_ROW = 3
 INFO_ROW_PT = 74.25
-INFO_WIDTHS = (50, 9, 20.625, 9, 28, 9, 11, 11, 11, 11, 11, 16, 16)  # B〜N 列
-_INFO_BODY_COL, _INFO_FACE_COL = 13, 14                               # M 列 全身画像 / N 列 顔画像
+INFO_WIDTHS = (50, 9, 20.625, 9, 28, 11, 9, 11, 11, 11, 11, 11, 16, 16)  # B〜O 列
+_INFO_BODY_COL, _INFO_FACE_COL = 14, 15                               # N 列 全身画像 / O 列 顔画像
 DIST_DECIMALS = 2                                                      # 距離(m)の小数桁数
 
 
@@ -490,7 +495,7 @@ def _build_info_sheet(ws, entries: list[GalleryEntry], images: _InCellImages) ->
         r = INFO_FIRST_ROW + i
         cam, video, track, fname, direction, w, h = _values(e)
         conf = NA if e.face_conf is None else round(float(e.face_conf), 4)
-        vals = [f'=C{r}&"|"&D{r}&"|"&E{r}&"|"&F{r}', cam, video, track, fname, direction, w, h, conf, _foot_text(e), _dist_value(e)]
+        vals = [f'=C{r}&"|"&D{r}&"|"&E{r}&"|"&F{r}', cam, video, track, fname, _angle_text(e), direction, w, h, conf, _foot_text(e), _dist_value(e)]
         for k, v in enumerate(vals):
             _put(ws, r, 2 + k, v)
         for col, path in ((_INFO_BODY_COL, e.body_path), (_INFO_FACE_COL, e.face_path)):   # M 列 全身画像 / N 列 顔画像

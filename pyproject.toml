@@ -30,6 +30,7 @@ dependencies = [
     "scikit-image>=0.21,<2.2",
     # LAFS の重み（Google Drive 配布）の自動取得用
     "gdown>=5.0",
+    "mediapipe>=1.2.3",
 ]
 
 [dependency-groups]

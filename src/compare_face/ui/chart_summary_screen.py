@@ -1,5 +1,5 @@
 """集計画面。距離・向き・精度分析のレポート（Excel）の点を、指定した距離の範囲で集計して一覧にする（処理は core/report/chart_summary.py）。
-チャート(PNG)確認画面の「集計画面」から開く。Excel の初期値は距離・向き・精度分析画面で指定した Excel。
+チャート確認画面の「集計画面」から開く。Excel の初期値は距離・向き・精度分析画面で指定した Excel。
 一覧は範囲選択して Ctrl+C（または「一覧をコピー」）で Excel に貼り付けられる。"""
 from __future__ import annotations
 

@@ -102,17 +102,17 @@ def test_report_has_distance_row_and_column(tmp_path, monkeypatch):
     wb = openpyxl.load_workbook(out)
     info = wb[INFO_SHEET_NAME]
     exp = round(_expected((100.4, 200.6)), 2)
-    # 並び: Cam1 の 2 枚（距離あり）→ Cam2（設定なし）。L 列 = 足元の座標（K 列）の右の「距離」
-    assert info["L2"].value == "距離" and info["K2"].value == "足元の座標"
-    assert [info.cell(row=r, column=12).value for r in (3, 4, 5)] == [exp, exp, "-"]
+    # 並び: Cam1 の 2 枚（距離あり）→ Cam2（設定なし）。M 列 = 足元の座標（L 列）の右の「距離」
+    assert info["M2"].value == "距離" and info["L2"].value == "足元の座標"
+    assert [info.cell(row=r, column=13).value for r in (3, 4, 5)] == [exp, exp, "-"]
     ws = wb[SHEET_NAME]
-    assert ws.cell(row=13, column=12).value == "距離" and ws.cell(row=12, column=12).value == "足元の座標"
-    assert ws.cell(row=15, column=10).value == "距離"
-    lk = "=VLOOKUP({}, 対象画像情報!$B$3:$N$200, 11, FALSE)"
-    assert ws.cell(row=13, column=FIRST_COL).value == lk.format("M4")
-    assert ws.cell(row=FIRST_ROW, column=10).value == lk.format("A16")
+    assert ws.cell(row=14, column=13).value == "距離" and ws.cell(row=13, column=13).value == "足元の座標"
+    assert ws.cell(row=16, column=11).value == "距離"
+    lk = "=VLOOKUP({}, 対象画像情報!$B$3:$O$200, 12, FALSE)"
+    assert ws.cell(row=14, column=FIRST_COL).value == lk.format("N4")
+    assert ws.cell(row=FIRST_ROW, column=11).value == lk.format("A17")
     with zipfile.ZipFile(out) as z:
-        assert re.search(r"<f>VLOOKUP\(M4, 対象画像情報!\$B\$3:\$N\$200, 11, FALSE\)</f>", z.read("xl/worksheets/sheet2.xml").decode("utf-8"))
+        assert re.search(r"<f>VLOOKUP\(N4, 対象画像情報!\$B\$3:\$O\$200, 12, FALSE\)</f>", z.read("xl/worksheets/sheet2.xml").decode("utf-8"))
 
 
 def test_legacy_calibration_focal_is_still_used(tmp_path):

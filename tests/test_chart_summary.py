@@ -120,3 +120,10 @@ def test_two_ranges_are_merged_without_double_count():
     assert rows[(sec, "総数", "データ件数")].count == 3          # 7 m の点は両方の範囲外
     overlap = [DistanceRange.both(0.0, 5.0), DistanceRange.both(0.0, 3.0)]
     assert next(r for r in summarize(points, [0], [ICON_A], overlap) if r.item == "データ件数" and r.section != "全体").count == 2
+
+
+def test_condition_row_is_color_and_icon():
+    points = [pt(1, 1, 0, ICON_A), pt(2, 2, 0, ICON_B), pt(3, 3, 1, ICON_A), pt(4, 4, 2, ICON_A)]
+    rows = [r for r in summarize(points, [0, 1], [ICON_A], [DistanceRange.both(0.0, 10.0)]) if r.section.startswith("距離範囲")]
+    cond = next(r for r in rows if r.item == "集計距離範囲内で指定条件に合致するデータ")
+    assert cond.count == 2 and cond.ratio == 0.5       # 色 0・1 かつ アイコン A の 2 件 / 範囲内 4 件

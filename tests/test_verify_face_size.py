@@ -90,37 +90,41 @@ def test_run_end_to_end_layout(tmp_path, monkeypatch):
     wb = openpyxl.load_workbook(out)
     assert wb.sheetnames[:2] == [INFO_SHEET_NAME, SHEET_NAME]
     ws = wb[SHEET_NAME]
-    # 高さ昇順: 40 → 60 → 80。横は M 列以降（5〜15 行目）、縦は 16 行目以降（B〜L 列）
-    assert (FIRST_ROW, FIRST_COL) == (16, 13)
-    assert [ws.cell(row=15, column=FIRST_COL + j).value for j in range(3)] == [40.0, 60.0, 80.0]
-    assert [ws.cell(row=14, column=FIRST_COL + j).value for j in range(3)] == [30.0, 45.0, 60.0]
+    # 高さ昇順: 40 → 60 → 80。横は N 列以降（5〜16 行目）、縦は 17 行目以降（B〜M 列）
+    assert (FIRST_ROW, FIRST_COL) == (17, 14)
+    assert [ws.cell(row=16, column=FIRST_COL + j).value for j in range(3)] == [40.0, 60.0, 80.0]
+    assert [ws.cell(row=15, column=FIRST_COL + j).value for j in range(3)] == [30.0, 45.0, 60.0]
     assert [ws.cell(row=7, column=FIRST_COL + j).value for j in range(3)] == ["1", "2", "1"]
     assert [ws.cell(row=FIRST_ROW + i, column=3).value for i in range(3)] == ["v1.mp4", "v2.mp4", "v1.mp4"]  # 縦側 C 列 = 映像
     assert [ws.cell(row=FIRST_ROW + i, column=4).value for i in range(3)] == ["1", "2", "1"]          # D 列 = 追跡ID
-    assert [ws.cell(row=FIRST_ROW + i, column=11).value for i in range(3)] == [30.0, 45.0, 60.0]      # K 列 = 幅
-    assert [ws.cell(row=FIRST_ROW + i, column=12).value for i in range(3)] == [40.0, 60.0, 80.0]      # L 列 = 高さ
-    assert ws.cell(row=10, column=FIRST_COL).value == "=VLOOKUP(M4, 対象画像情報!$B$3:$N$200, 6, FALSE)"  # 顔の向き
-    assert ws.cell(row=FIRST_ROW, column=7).value == "=VLOOKUP(A16, 対象画像情報!$B$3:$N$200, 6, FALSE)"
-    assert [ws.cell(row=5 + k, column=12).value for k in range(11)] == [
-        "カメラID", "映像ファイル名", "追跡ID", "画像ファイル名", "顔画像", "顔の向き", "顔の信頼度", "足元の座標", "距離",
-        "画像サイズ(幅:px)", "画像サイズ\n(高さ:px)"]   # L15 は縦側の見出しと兼用
-    assert [ws.cell(row=15, column=2 + k).value for k in range(11)] == [
-        "カメラ\nID", "映像\nファイル名", "追跡\nID", "画像\nファイル名", "顔画像", "顔の向き", "顔の信頼度", "足元の座標", "距離",
+    assert [ws.cell(row=FIRST_ROW + i, column=12).value for i in range(3)] == [30.0, 45.0, 60.0]      # L 列 = 幅
+    assert [ws.cell(row=FIRST_ROW + i, column=13).value for i in range(3)] == [40.0, 60.0, 80.0]      # M 列 = 高さ
+    assert ws.cell(row=10, column=FIRST_COL).value == "=VLOOKUP(N4, 対象画像情報!$B$3:$O$200, 6, FALSE)"  # 顔の角度
+    assert ws.cell(row=11, column=FIRST_COL).value == "=VLOOKUP(N4, 対象画像情報!$B$3:$O$200, 7, FALSE)"  # 顔の向き
+    assert ws.cell(row=FIRST_ROW, column=7).value == "=VLOOKUP(A17, 対象画像情報!$B$3:$O$200, 6, FALSE)"
+    assert ws.cell(row=FIRST_ROW, column=8).value == "=VLOOKUP(A17, 対象画像情報!$B$3:$O$200, 7, FALSE)"
+    assert [ws.cell(row=5 + k, column=13).value for k in range(12)] == [
+        "カメラID", "映像ファイル名", "追跡ID", "画像ファイル名", "顔画像", "顔の角度", "顔の向き", "顔の信頼度", "足元の座標", "距離",
+        "画像サイズ(幅:px)", "画像サイズ\n(高さ:px)"]   # M16 は縦側の見出しと兼用
+    assert [ws.cell(row=16, column=2 + k).value for k in range(12)] == [
+        "カメラ\nID", "映像\nファイル名", "追跡\nID", "画像\nファイル名", "顔画像", "顔の角度", "顔の向き", "顔の信頼度", "足元の座標", "距離",
         "画像サイズ\n(幅:px)", "画像サイズ\n(高さ:px)"]
-    # 式: 4 行目 / A 列はキー、顔画像・顔の信頼度・足元の座標・距離は対象画像情報シートを引く
-    assert ws["M4"].value == '=M5&"|"&M6&"|"&M7&"|"&M8' and ws["O4"].value == '=O5&"|"&O6&"|"&O7&"|"&O8'
-    assert ws["A16"].value == '=B16&"|"&C16&"|"&D16&"|"&E16'
-    lk = "VLOOKUP({}, 対象画像情報!$B$3:$N$200, {}, FALSE)"
-    assert ws["M9"].value == "=" + lk.format("M4", 13) and ws["M11"].value == "=" + lk.format("M4", 9)
-    assert ws["N12"].value == "=" + lk.format("N4", 10) and ws["O13"].value == "=" + lk.format("O4", 11)
-    assert ws["F16"].value == "=" + lk.format("A16", 13) and ws["H17"].value == "=" + lk.format("A17", 9)
-    assert ws["I18"].value == "=" + lk.format("A18", 10) and ws["J16"].value == "=" + lk.format("A16", 11)
-    # 列幅（追加した列 F・H・I・J は 11.38）と行の高さ（顔画像の行と 16 行目以降は 80）
-    assert [ws.column_dimensions[c].width for c in "FHIJ"] == [11.38] * 4
+    # 式: 4 行目 / A 列はキー、顔画像・顔の角度・顔の向き・顔の信頼度・足元の座標・距離は対象画像情報シートを引く
+    assert ws["N4"].value == '=N5&"|"&N6&"|"&N7&"|"&N8' and ws["P4"].value == '=P5&"|"&P6&"|"&P7&"|"&P8'
+    assert ws["A17"].value == '=B17&"|"&C17&"|"&D17&"|"&E17'
+    lk = "VLOOKUP({}, 対象画像情報!$B$3:$O$200, {}, FALSE)"
+    assert ws["N9"].value == "=" + lk.format("N4", 14) and ws["N10"].value == "=" + lk.format("N4", 6)
+    assert ws["N11"].value == "=" + lk.format("N4", 7) and ws["O12"].value == "=" + lk.format("O4", 10)
+    assert ws["P13"].value == "=" + lk.format("P4", 11) and ws["N14"].value == "=" + lk.format("N4", 12)
+    assert ws["F17"].value == "=" + lk.format("A17", 14) and ws["G17"].value == "=" + lk.format("A17", 6)
+    assert ws["H18"].value == "=" + lk.format("A18", 7) and ws["I19"].value == "=" + lk.format("A19", 10)
+    assert ws["J17"].value == "=" + lk.format("A17", 11) and ws["K18"].value == "=" + lk.format("A18", 12)
+    # 列幅（追加した列 F・I・J・K は 11.38）と行の高さ（顔画像の行と 17 行目以降は 80）
+    assert [ws.column_dimensions[c].width for c in "FIJK"] == [11.38] * 4
     assert ws.row_dimensions[9].height == 80 and all(ws.row_dimensions[FIRST_ROW + i].height == 80 for i in range(3))
     # フォントは全セル Meiryo UI
     assert all(c.font.name == "Meiryo UI" for row in ws.iter_rows() for c in row)
-    assert ws.freeze_panes == "M16"
+    assert ws.freeze_panes == "N17"
     # 類似度は左下半分（縦 i > 横 j）のみ
     for i in range(3):
         for j in range(3):
@@ -296,22 +300,22 @@ def test_info_sheet_layout_formula_images_and_order(tmp_path, monkeypatch):
     assert imwrite(body, np.random.default_rng(1).integers(0, 255, (120, 50, 3), np.uint8))  # 縦長の全身画像
     out, _ = run_verify_face_size([a, b, c], tmp_path / "rep", "AdaFace", "なし", echo=lambda m: None)
     ws = openpyxl.load_workbook(out)[INFO_SHEET_NAME]
-    heads = [ws.cell(row=2, column=k).value for k in range(2, 15)]
-    assert heads[0] == "キー情報" and heads[5] == "顔の向き" and heads[-5:] == ["顔の信頼度", "足元の座標", "距離", "全身画像", "顔画像"]
+    heads = [ws.cell(row=2, column=k).value for k in range(2, 16)]
+    assert heads[0] == "キー情報" and heads[5] == "顔の角度" and heads[6] == "顔の向き" and heads[-5:] == ["顔の信頼度", "足元の座標", "距離", "全身画像", "顔画像"]
     # 並び: カメラID → 追跡ID（数値）→ 映像 → 画像ファイル名（列は カメラID・映像・追跡ID・画像ファイル名）
     rows = [[ws.cell(row=r, column=k).value for k in range(3, 7)] for r in range(3, 7)]
     assert rows == [["Cam1", "v2.mp4", "9", "20260311_000004_000_face.jpg"], ["Cam1", "v9.mp4", "9", "20260311_000003_000_face.jpg"],
                     ["Cam2", "v1.mp4", "10", "20260311_000001_000_face.jpg"], ["Cam2", "v1.mp4", "10", "20260311_000002_000_face.jpg"]]
     assert ws["B3"].value == '=C3&"|"&D3&"|"&E3&"|"&F3' and ws["B6"].value == '=C6&"|"&D6&"|"&E6&"|"&F6'
-    assert ws["G5"].value is None                                   # 顔の向きは空欄
-    assert (ws["H5"].value, ws["I5"].value) == (60.0, 80.0)         # 画像サイズ = 顔 bbox の幅・高さ
+    assert ws["H5"].value is None                                   # 顔の向きは空欄
+    assert (ws["I5"].value, ws["J5"].value) == (60.0, 80.0)         # 画像サイズ = 顔 bbox の幅・高さ
     # 顔の信頼度は J 列（JSON の face_conf を小数 4 桁。無いものは「-」）
-    assert [ws.cell(row=r, column=10).value for r in range(3, 7)] == ["-", "-", 0.9123, "-"]
-    assert [ws.cell(row=r, column=11).value for r in range(3, 7)] == ["(100, 201)"] * 4   # 足元の座標は K 列「(x, y)」
-    assert [ws.cell(row=r, column=12).value for r in range(3, 7)] == ["-"] * 4            # 距離は L 列（カメラ設定フォルダ未指定は「-」）
-    assert ws.auto_filter.ref == "B2:N6"
+    assert [ws.cell(row=r, column=11).value for r in range(3, 7)] == ["-", "-", 0.9123, "-"]
+    assert [ws.cell(row=r, column=12).value for r in range(3, 7)] == ["(100, 201)"] * 4   # 足元の座標は K 列「(x, y)」
+    assert [ws.cell(row=r, column=13).value for r in range(3, 7)] == ["-"] * 4            # 距離は L 列（カメラ設定フォルダ未指定は「-」）
+    assert ws.auto_filter.ref == "B2:O6"
     assert all(c.font.name == "Meiryo UI" for row in ws.iter_rows() for c in row)
-    assert [ws.column_dimensions[c].width for c in "LMN"] == [11, 16, 16]
+    assert [ws.column_dimensions[c].width for c in "MNO"] == [11, 16, 16]
     assert not ws._images   # 画像は浮かせず、セル内に入れる（下で確認）
 
     # 全身画像 M 列・顔画像 N 列は「セルに画像を貼り付け」と同じセル内画像（richData + セルの vm）
@@ -332,22 +336,22 @@ def test_info_sheet_layout_formula_images_and_order(tmp_path, monkeypatch):
         m = re.search(rf'<c r="{coord}"[^>]*? t="e" vm="(\d+)"', sheet_xml)
         return int(m.group(1)) if m else None
 
-    info_vm = {c: vm_of(sheet1, c) for c in ("M3", "M4", "M5", "M6", "N3", "N4", "N5", "N6")}
-    assert [c for c, v in info_vm.items() if v is None] == ["M3", "M4", "M6"]   # 全身画像があるのは 000001 の M5 だけ（空欄のまま）
+    info_vm = {c: vm_of(sheet1, c) for c in ("N3", "N4", "N5", "N6", "O3", "O4", "O5", "O6")}
+    assert [c for c, v in info_vm.items() if v is None] == ["N3", "N4", "N6"]   # 全身画像があるのは 000001 の N5 だけ（空欄のまま）
     assert all(rvs[v - 1][1] == "5" for v in info_vm.values() if v)             # 画像そのもの = CalcOrigin 5
     # 縦長の全身画像は縦横比を保ったまま埋め込まれている
-    body = cv2.imdecode(np.frombuffer(media[f"xl/media/image{int(rvs[info_vm['M5'] - 1][0]) + 1}.jpeg"], np.uint8), cv2.IMREAD_COLOR)
+    body = cv2.imdecode(np.frombuffer(media[f"xl/media/image{int(rvs[info_vm['N5'] - 1][0]) + 1}.jpeg"], np.uint8), cv2.IMREAD_COLOR)
     assert body.shape[1] / body.shape[0] == pytest.approx(50 / 120, rel=0.02)
     # 行列シートの顔画像（VLOOKUP の式）は式を残したまま、同じ画像を CalcOrigin 4 のセル内画像として表示する
     ws2 = openpyxl.load_workbook(out)[SHEET_NAME]
-    assert ws2["M9"].value.startswith("=VLOOKUP(M4, 対象画像情報!$B$3:$N$200, 13, FALSE)")
-    for coord in ("M9", "N9", "O9", "P9", "F16", "F17", "F18", "F19"):
+    assert ws2["N9"].value.startswith("=VLOOKUP(N4, 対象画像情報!$B$3:$O$200, 14, FALSE)")
+    for coord in ("N9", "O9", "P9", "Q9", "F17", "F18", "F19", "F20"):
         vm = vm_of(sheet2, coord)
         assert vm is not None and rvs[vm - 1][1] == "4"
         assert f"<f>VLOOKUP(" in re.search(rf'<c r="{coord}".*?</c>', sheet2, re.S).group(0)
     # 同じ画像は 1 つの埋め込みを共有する（情報シートの顔画像 M 列 = 行列シートの顔画像）
-    face_rels = {rvs[v - 1][0] for c, v in info_vm.items() if c.startswith("N")}
-    assert {rvs[vm_of(sheet2, c) - 1][0] for c in ("M9", "N9", "O9", "P9")} == face_rels
+    face_rels = {rvs[v - 1][0] for c, v in info_vm.items() if c.startswith("O")}
+    assert {rvs[vm_of(sheet2, c) - 1][0] for c in ("N9", "O9", "P9", "Q9")} == face_rels
 
 
 def test_grayscale_option(tmp_path, monkeypatch):

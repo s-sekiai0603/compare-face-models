@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -60,6 +60,8 @@ class GalleryEntry:
     invalid: bool = False              # 無効画像（別人の骨格を含む等）。比較に使わない
     invalid_reason: str = ""
     pose: tuple[float, float, float] | None = None  # レポート時に推定した頭部姿勢 (yaw, pitch, roll)[度]
+    yaws: dict[str, float] = field(default_factory=dict)  # 顔の角度（顔サイズ別精度検証用）: 頭部姿勢モデル名 -> yaw[度]
+    face_angle: float | None = None    # 顔の角度（顔サイズ別精度検証用）: 選んだモデルの yaw[度]（全モデルの平均を選べば yaws の平均）。推定できなければ None
     quality_norm: float | None = None  # 品質ノルム（AdaFace の特徴量ノルム。クエリ自動選別時に計算）
     gate_excluded_reason: str = ""     # レポート時の採用基準（gate.GateFilter）で外した理由（空なら使用）
     excluded_reason: str = ""          # クエリ自動選別で外した理由（空なら使用）
