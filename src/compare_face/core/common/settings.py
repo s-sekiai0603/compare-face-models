@@ -149,9 +149,16 @@ DISTANCE_POSE_CHART_DEFAULTS = {
     "excluded_colors": [],   # 出力対象から外した色の段階の番号（distance_pose_chart.COLOR_GROUPS。それ以外は対象）
     "excluded_icons": [],    # 出力対象から外したアイコンのファイル名（それ以外は対象）
     "excluded_cameras": [],  # カメラIDのリストで、チェックを外したカメラID（それ以外は対象）
-    "viewer_dir": "",        # チャート(PNG)ビューアの PNG の格納先（空 = 「PNG の出力先」）
+    "viewer_dir": "",        # チャートビューアの PNG の格納先（空 = 「PNG の出力先」）
     "angle_mode": False,     # ビューア: 顔角度の組合せ表示
     "angle_excel_path": "",  # 顔角度の組合せ表示の Excel（空 = 「summary_excel_path」→「excel_path」を初期値にする）
+    "heat_excel_path": "",   # 距離の組合せ表示の Excel（空 = 「excel_path」→「summary_excel_path」を初期値にする）
+    "heat_split_lr": False,  # 距離の組合せ表示: 顔の向きを左右に振り分け
+    "heat_unit_m": 0.0,      # 距離の組合せ表示: 距離の集計単位(m。0 = 集計しない)
+    "dist_show_icons": True, # 距離の組合せ表示: アイコンを表示
+    "dist_show_heat": False, # 距離の組合せ表示: ヒートマップを表示
+    "angle_show_points": True,   # 顔角度の組合せ表示: 点（アイコン）を表示
+    "angle_show_heat": True,     # 顔角度の組合せ表示: ヒートマップを表示
     "angle_filter": False,   # 顔角度の組合せ表示: 距離で絞り込む
     "angle_separate": False, # 顔角度の組合せ表示: 距離範囲を縦（基準）と横（比較対象）で別々に指定する
     "angle_ranges": [[0.0, 10.0, 0.0, 10.0], [0.0, 10.0, 0.0, 10.0]],   # 範囲 1・2 の [縦の下限, 縦の上限, 横の下限, 横の上限](m)

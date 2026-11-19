@@ -104,3 +104,19 @@ def test_angle_overlay_reads_excel_once_and_applies_conditions(tmp_path, monkeyp
     assert o.data is data                               # 更新されていない Excel は読み直さない
     assert "2 点をプロット" in o.message
     assert o.image.size[0] > 0
+
+
+@_FONT
+def test_render_angle_chart_can_hide_points_and_heatmap():
+    from compare_face.core.report.angle_chart import M_LEFT, M_TOP, _to_px
+    pts = [_pt(0, 0, 0)] * 5
+    xy = (int(_to_px(0, M_LEFT)) + 1, int(_to_px(0, M_TOP)) + 1)
+    both = render_angle_chart(pts, "t")
+    only_heat = render_angle_chart(pts, "t", show_points=False)
+    only_pts = render_angle_chart(pts, "t", show_heat=False)
+    none = render_angle_chart(pts, "t", show_points=False, show_heat=False)
+    off = (xy[0] + 25, xy[1] + 25)                                      # 点（半径 7px）の外・軸線の外・ヒートマップの内側
+    assert none.getpixel(xy)[:3] != color_group_rgb(0) and none.getpixel(off)[:3] == (255, 255, 255)   # どちらも消すと点もヒートマップも無い
+    assert only_heat.getpixel(off) != none.getpixel(off) and only_heat.getpixel(xy)[:3] != color_group_rgb(0)   # ヒートマップだけ
+    assert only_pts.getpixel(xy)[:3] == color_group_rgb(0) and only_pts.getpixel(off)[:3] == (255, 255, 255)    # 点だけ
+    assert both.tobytes() != only_heat.tobytes() != only_pts.tobytes()

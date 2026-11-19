@@ -1,4 +1,4 @@
-"""顔角度の組合せ表示（チャート(PNG)確認画面の表示モード）。GUI 非依存。
+"""顔角度の組合せ表示（チャート確認画面の表示モード）。GUI 非依存。
 
 距離・向き・精度分析と同じ Excel レポートの「比較結果誤識別数まとめ」シートから、縦 i × 横 j の組合せごとに
   ・基準となる顔画像（縦 i）の顔の角度 = 縦軸
@@ -19,7 +19,7 @@ import numpy as np
 from openpyxl import load_workbook
 
 from ..common.settings import PROJECT_ROOT
-from .chart_png_viewer import _heat_palette
+from .distance_heatmap import heat_palette
 from .chart_summary import DistanceRange, in_range
 from .distance_pose_chart import (
     COLOR_GROUPS, ChartPoint, _as_float, _fill_rgb, _matrix_layout, _norm, _read_info, color_group, color_group_rgb, find_japanese_font,
@@ -178,8 +178,9 @@ def _man_faces() -> list[tuple[int, str, "object | None"]]:
 
 
 def render_angle_chart(points: list[ChartPoint], title: str = "", notes: Collection[str] = (),
-                       color_order: list[int] | None = None):
+                       color_order: list[int] | None = None, show_points: bool = True, show_heat: bool = True):
     """顔角度の組合せのチャート（Pillow の RGBA 画像）を描く。ヒートマップ（背面）+ グリッド + 点 + 軸の外側の顔画像 + 色の凡例。
+    show_points / show_heat = 点（アイコン）・ヒートマップの表示 / 非表示（凡例も合わせる）。
     color_order = 点を手前に描く色の順（先頭ほど手前。None = 色の段階の小さい順 = 精度の高い点が手前）。"""
     from PIL import Image, ImageDraw, ImageFont
 
@@ -194,13 +195,13 @@ def render_angle_chart(points: list[ChartPoint], title: str = "", notes: Collect
     img = Image.new("RGBA", (IMG_W, IMG_H), "white")
 
     # ヒートマップ（背面）
-    level, dens = heat_grid(points)
+    level, dens = heat_grid(points) if show_heat else (None, np.zeros((1, 1), np.float32))
     peak = float(np.percentile(dens[dens > 1e-6], 99)) if (dens > 1e-6).any() else 0.0
     if peak > 0:
         import cv2
         alpha = np.clip(dens / peak, 0, 1) ** HEAT_ALPHA_GAMMA * HEAT_MAX_ALPHA
         alpha[dens < peak * 1e-3] = 0
-        heat = np.dstack([_heat_palette(level), alpha * 255]).astype(np.float32)
+        heat = np.dstack([heat_palette(level), alpha * 255]).astype(np.float32)
         # 格子（-100〜+100 度）は行 = 縦軸の角度、列 = 横軸の角度（どちらも小さい方が先）。軸は +100 度が左 / 上なので反転する
         heat = heat[::-1, ::-1]
         heat = cv2.resize(heat, (PLOT, PLOT), interpolation=cv2.INTER_CUBIC)
@@ -226,7 +227,7 @@ def render_angle_chart(points: list[ChartPoint], title: str = "", notes: Collect
 
     # 点（精度の色）。手前に描く色の順: color_order の先頭ほど手前
     rank = {g: k for k, g in enumerate(color_order if color_order is not None else range(len(COLOR_GROUPS)))}
-    for p in sorted(points, key=lambda q: -rank.get(color_group(q.rgb), len(rank))):
+    for p in sorted(points if show_points else [], key=lambda q: -rank.get(color_group(q.rgb), len(rank))):
         if p.ang_v is None or p.ang_h is None:
             continue
         cx, cy = _to_px(max(-AXIS_LIMIT, min(AXIS_LIMIT, p.ang_h)), x0), _to_px(max(-AXIS_LIMIT, min(AXIS_LIMIT, p.ang_v)), y0)
@@ -262,7 +263,7 @@ def render_angle_chart(points: list[ChartPoint], title: str = "", notes: Collect
 
     # 凡例（右の余白）: 精度の色と、背景のヒートマップの説明
     lx, ly = x0 + PLOT + 40, y0
-    d.text((lx, ly), "精度の色（誤識別数の順位）", fill=text_c, font=f_leg)
+    d.text((lx, ly), "精度の色（誤識別数の順位）" if show_points else "誤識別数の順位ごとの点数", fill=text_c, font=f_leg)
     counts: dict[int | None, int] = {}
     for p in points:
         g = color_group(p.rgb)
@@ -273,13 +274,13 @@ def render_angle_chart(points: list[ChartPoint], title: str = "", notes: Collect
         d.text((lx + 42, yy), f"{label}（{counts.get(g, 0)}）", fill=text_c, font=f_leg)
     yy = ly + 50 + 46 * len(COLOR_GROUPS) + 20
     d.text((lx, yy), f"点数: {len(points)}", fill=text_c, font=f_leg)
-    for k, t in enumerate(("背景のヒートマップ:", "点の色（順位の段階）の", f"加重平均（ガウス重み σ={HEAT_SIGMA_DEG:g}°）", "濃さ = 点の密集具合")):
+    for k, t in enumerate(("背景のヒートマップ:", "点の色（順位の段階）の", f"加重平均（ガウス重み σ={HEAT_SIGMA_DEG:g}°）", "濃さ = 点の密集具合") if show_heat else ()):
         d.text((lx, yy + 50 + 34 * k), t, fill=text_c, font=f_leg)
     return img
 
 
 class AngleOverlay:
-    """画面から使う窓口（ChartOverlay / HeatmapOverlay と同じ image / compose(paths, progress) を持つ）。
+    """画面から使う窓口（ChartOverlay と同じ image / compose(paths, progress) を持つ）。
     configure で条件を決め、compose で Excel を読んで（同じパス・更新時刻なら読み直さない）絞り込み、描く。"""
 
     def __init__(self):
@@ -289,8 +290,9 @@ class AngleOverlay:
         self._key = None
         self._params: dict = {}
 
-    def configure(self, excel_path: str, camera: str | None, colors: list[int], ranges: list[DistanceRange] | None) -> None:
-        self._params = dict(excel_path=excel_path, camera=camera, colors=list(colors), ranges=ranges)
+    def configure(self, excel_path: str, camera: str | None, colors: list[int], ranges: list[DistanceRange] | None,
+                  show_points: bool = True, show_heat: bool = True) -> None:
+        self._params = dict(excel_path=excel_path, camera=camera, colors=list(colors), ranges=ranges, show_points=show_points, show_heat=show_heat)
 
     def compose(self, paths=None, progress=None):
         p = self._params
@@ -306,7 +308,7 @@ class AngleOverlay:
         notes = [f"Excel: {path.name}",
                  f"対象カメラ: {p['camera'] or 'すべてのカメラ'}",
                  "距離: " + (" + ".join(r.label() for r in p["ranges"]) if p["ranges"] else "絞り込みなし")]
-        self.image = render_angle_chart(pts, "顔の角度の組合せによる精度分析", notes, p["colors"])
+        self.image = render_angle_chart(pts, "顔の角度の組合せによる精度分析", notes, p["colors"], p["show_points"], p["show_heat"])
         d = self.data
         self.message = (f"{len(pts)} 点をプロット（顔の角度がある組合せ {len(d.points)} 点中。画像 {d.n_images} 枚"
                         f"・顔の角度なし {d.no_angle} 枚・距離なし {d.no_distance} 枚）")

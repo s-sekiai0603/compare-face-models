@@ -132,7 +132,7 @@ class DistancePoseChartScreen(QWidget):
         self.png_dir_edit.setReadOnly(True)
         self.png_dir_edit.setPlaceholderText("未指定のときは Excel と同じフォルダ")
         self.png_dir_btn = add_path_row(root, "PNG の出力先:", self.png_dir_edit, self._pick_png_dir)
-        self.btn_viewer = QPushButton("チャート(PNG)確認")
+        self.btn_viewer = QPushButton("チャート確認")
         self.btn_viewer.setToolTip("出力したチャートの PNG を、条件を選んで重ねて表示するビューアを開く（PNG 出力のオン・オフに関係なく使える）")
         self.btn_viewer.clicked.connect(self._open_viewer)
         root.itemAt(root.count() - 1).layout().addWidget(self.btn_viewer)
@@ -175,7 +175,7 @@ class DistancePoseChartScreen(QWidget):
         self.btn_cam_none.clicked.connect(lambda: self._set_all_cameras(False))
 
     def _open_viewer(self) -> None:
-        """チャート(PNG)ビューアを開く。格納先の初期値は「PNG の出力先」（未指定なら Excel と同じフォルダ）。"""
+        """チャートビューアを開く。格納先の初期値は「PNG の出力先」（未指定なら Excel と同じフォルダ）。"""
         folder = self.png_dir_edit.text() or (str(Path(self.excel_edit.text()).parent) if self.excel_edit.text() else "")
         self._viewer = ChartViewerScreen(folder, self.settings, save_distance_pose_chart_settings)
         self._viewer.show()
