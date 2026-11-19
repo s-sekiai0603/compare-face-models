@@ -160,6 +160,8 @@ class ChartPoint:
     cam_v: str = ""     # 縦の画像のカメラID
     cam_h: str = ""     # 横の画像のカメラID
     sim: float | None = None    # 縦の画像と横の画像の類似度（類似度まとめシート。読めなければ None）
+    ang_v: float | None = None  # 縦の画像の顔の角度（yaw[度]。顔角度の組合せ表示だけで使う）
+    ang_h: float | None = None  # 横の画像の顔の角度
 
 
 @dataclass
@@ -212,6 +214,17 @@ def _fill_rgb(cell) -> tuple[int, int, int] | None:
         return None
 
 
+def _matrix_layout(ws) -> tuple[int, int]:
+    """まとめシートの (縦側の最初の画像の行, 横側の最初の画像の列)。行見出しの「カメラID」の位置から求める
+    （「顔の角度」の行・列を足す前に出力した Excel も読めるように、固定の FIRST_ROW / FIRST_COL ではなく実際の配置を見る）。
+    見つからなければ現在のレイアウト（FIRST_ROW / FIRST_COL）。"""
+    label_col = next((c for c in range(2, 40) if _norm(ws.cell(row=5, column=c).value) == "カメラID"), None)
+    head_row = next((r for r in range(5, 40) if _norm(ws.cell(row=r, column=2).value) == "カメラID"), None)
+    if label_col is None or head_row is None:
+        return FIRST_ROW, FIRST_COL
+    return head_row + 1, label_col + 1
+
+
 def read_chart_data(xlsx: Path | str) -> ChartData:
     """誤識別数シートから、チャートの点（距離・顔の向き・背景色）を読む。必要なシートが無ければ ValueError。"""
     path = Path(xlsx)
@@ -221,19 +234,20 @@ def read_chart_data(xlsx: Path | str) -> ChartData:
         raise ValueError(f"「{MISIDENTIFY_SHEET_NAME}」シートがありません。顔サイズ別精度検証で出力した Excel を指定してください。")
     ws, wsv = wb[MISIDENTIFY_SHEET_NAME], wbv[MISIDENTIFY_SHEET_NAME]
     info = _read_info(wb[INFO_SHEET_NAME]) if INFO_SHEET_NAME in wb.sheetnames else {}
+    first_row, first_col = _matrix_layout(ws)
 
-    label_col = FIRST_COL - 1
-    head_row = FIRST_ROW - 1
+    label_col = first_col - 1
+    head_row = first_row - 1
     row_of = {_norm(ws.cell(row=r, column=label_col).value): r for r in range(5, head_row)}   # 横側: 行見出し → 行
     col_of = {_norm(ws.cell(row=head_row, column=c).value): c for c in range(2, label_col)}   # 縦側: 見出し → 列
     for need in ("距離", "顔の向き"):
         if need not in row_of or need not in col_of:
             raise ValueError(f"「{MISIDENTIFY_SHEET_NAME}」シートに「{need}」の行・列が見つかりません（レイアウトが違います）。")
     n_cols = 0
-    while ws.cell(row=5, column=FIRST_COL + n_cols).value not in (None, ""):
+    while ws.cell(row=5, column=first_col + n_cols).value not in (None, ""):
         n_cols += 1
     n_rows = 0
-    while ws.cell(row=FIRST_ROW + n_rows, column=2).value not in (None, ""):
+    while ws.cell(row=first_row + n_rows, column=2).value not in (None, ""):
         n_rows += 1
     if n_cols == 0 or n_rows == 0:
         raise ValueError(f"「{MISIDENTIFY_SHEET_NAME}」シートに画像がありません。")
@@ -245,33 +259,34 @@ def read_chart_data(xlsx: Path | str) -> ChartData:
         return info.get(key, {}).get(what)
 
     def key_h(j: int):
-        return tuple(str(ws.cell(row=5 + k, column=FIRST_COL + j).value) for k in range(4))   # カメラID・映像・追跡ID・画像名
+        return tuple(str(ws.cell(row=5 + k, column=first_col + j).value) for k in range(4))   # カメラID・映像・追跡ID・画像名
 
     def key_v(i: int):
-        return tuple(str(ws.cell(row=FIRST_ROW + i, column=2 + k).value) for k in range(4))
+        return tuple(str(ws.cell(row=first_row + i, column=2 + k).value) for k in range(4))
 
     hor = []   # 横 j: (距離, 向き)
     for j in range(n_cols):
-        c = FIRST_COL + j
+        c = first_col + j
         hor.append((_as_float(resolve(wsv.cell(row=row_of["距離"], column=c).value, key_h(j), "距離")),
                     _direction(resolve(wsv.cell(row=row_of["顔の向き"], column=c).value, key_h(j), "顔の向き"))))
     ver = []   # 縦 i
     for i in range(n_rows):
-        r = FIRST_ROW + i
+        r = first_row + i
         ver.append((_as_float(resolve(wsv.cell(row=r, column=col_of["距離"]).value, key_v(i), "距離")),
                     _direction(resolve(wsv.cell(row=r, column=col_of["顔の向き"]).value, key_v(i), "顔の向き"))))
 
     cam_row, cam_col = row_of.get("カメラID"), col_of.get("カメラID")
-    hor_cam = [str(ws.cell(row=cam_row, column=FIRST_COL + j).value or "").strip() if cam_row else "" for j in range(n_cols)]
-    ver_cam = [str(ws.cell(row=FIRST_ROW + i, column=cam_col).value or "").strip() if cam_col else "" for i in range(n_rows)]
+    hor_cam = [str(ws.cell(row=cam_row, column=first_col + j).value or "").strip() if cam_row else "" for j in range(n_cols)]
+    ver_cam = [str(ws.cell(row=first_row + i, column=cam_col).value or "").strip() if cam_col else "" for i in range(n_rows)]
     wss = wbv[SIMILARITY_SHEET_NAME] if SIMILARITY_SHEET_NAME in wbv.sheetnames else None
+    s_row, s_col = _matrix_layout(wss) if wss is not None else (first_row, first_col)
 
     def similarity(i: int, j: int) -> float | None:
         """類似度シートの縦 i × 横 j の類似度。左下半分（i > j）にしか値が無いので、右上半分は対称の位置（j, i）で補完する。"""
         if wss is None:
             return None
         for a, b in ((max(i, j), min(i, j)), (min(i, j), max(i, j))):
-            v = wss.cell(row=FIRST_ROW + a, column=FIRST_COL + b).value
+            v = wss.cell(row=s_row + a, column=s_col + b).value
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 return float(v)
         return None
@@ -283,12 +298,12 @@ def read_chart_data(xlsx: Path | str) -> ChartData:
         for j, (dx, ox) in enumerate(hor):
             if i == j:
                 continue
-            v = ws.cell(row=FIRST_ROW + i, column=FIRST_COL + j).value
+            v = ws.cell(row=first_row + i, column=first_col + j).value
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 data.cells[(i, j)] = float(v)
             if dy is None or dx is None or oy is None or ox is None:
                 continue
-            rgb = _fill_rgb(ws.cell(row=FIRST_ROW + i, column=FIRST_COL + j))
+            rgb = _fill_rgb(ws.cell(row=first_row + i, column=first_col + j))
             if rgb is None:
                 data.no_fill += 1
                 continue
@@ -365,7 +380,8 @@ def chart_targets(data: ChartData, all_cameras: bool, per_camera: bool, unit_m: 
 
 
 def _read_info(ws) -> dict[tuple, dict]:
-    """対象画像情報シート: (カメラID, 映像ファイル名, 追跡ID, 画像ファイル名) → {顔の向き, 距離}。列は見出し（2 行目）で探す。"""
+    """対象画像情報シート: (カメラID, 映像ファイル名, 追跡ID, 画像ファイル名) → {顔の向き, 距離, 顔の角度}。列は見出し（2 行目）で探す。
+    「顔の角度」の列が無い（角度を足す前の）Excel では顔の角度は None。"""
     head = {_norm(c.value): c.column for c in ws[INFO_FIRST_ROW - 1] if c.value is not None}
     need = ("カメラID", "映像ファイル名", "追跡ID", "画像ファイル名", "顔の向き", "距離")
     if any(k not in head for k in need):
@@ -375,7 +391,8 @@ def _read_info(ws) -> dict[tuple, dict]:
         key = tuple(str(ws.cell(row=r, column=head[k]).value) for k in need[:4])
         if key[0] in ("None", ""):
             continue
-        out[key] = {"顔の向き": ws.cell(row=r, column=head["顔の向き"]).value, "距離": ws.cell(row=r, column=head["距離"]).value}
+        out[key] = {"顔の向き": ws.cell(row=r, column=head["顔の向き"]).value, "距離": ws.cell(row=r, column=head["距離"]).value,
+                    "顔の角度": ws.cell(row=r, column=head["顔の角度"]).value if "顔の角度" in head else None}
     return out
 
 

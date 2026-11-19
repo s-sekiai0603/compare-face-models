@@ -18,7 +18,7 @@ from ..core.common.settings import (
 )
 from ..core.features import visible_extractors
 from ..core.landmarks import ALIGNERS
-from ..core.report.verify_face_size import OUTPUT_MODES, needs_gallery
+from ..core.report.verify_face_size import ANGLE_AVERAGE, ANGLE_OPTIONS, OUTPUT_MODES, needs_gallery
 from .report_worker import VerifyFaceSizeWorker
 from .widgets import DropLineEdit, GateFilterRow, WeightsGuard, add_model_box, add_path_row, checked_name, fixed_label
 
@@ -116,6 +116,23 @@ class VerifyFaceSizeScreen(QWidget):
         self.cb_align168.setToolTip("通常は 112×112 でアラインする。ONにすると 168×168 でアラインし、特徴量モデルへ渡す直前に 112×112 へ縮小（INTER_AREA）する。比較対象・検証対象の両方に適用し、特徴量キャッシュは別ファイルになる")
         root.addWidget(self.cb_align168)
 
+        # 顔の角度（対象画像情報の「顔の角度」列に出す yaw）の抽出モデル
+        angle_box = QGroupBox("顔の角度（yaw）の抽出モデル")
+        al = QHBoxLayout(angle_box)
+        self.angle_group = QButtonGroup(self)
+        self.angle_buttons: dict[str, QRadioButton] = {}
+        cur = self.settings["angle_model"] if self.settings["angle_model"] in ANGLE_OPTIONS else ANGLE_AVERAGE
+        for key, label in ANGLE_OPTIONS.items():
+            rb = QRadioButton(label)
+            rb.setChecked(key == cur)
+            self.angle_group.addButton(rb)
+            self.angle_buttons[key] = rb
+            al.addWidget(rb)
+        al.addStretch()
+        angle_box.setToolTip("レポートの「対象画像情報」シートの「顔の角度」列に出す yaw（正面 = 0°、向かって右向き = マイナス、左向き = プラス）を求めるモデル。"
+                             "「すべてのモデルの平均」は、推定できたモデルの値の平均")
+        root.addWidget(angle_box)
+
         # モデル選択（レジストリへの登録でラジオが増える）
         self.model_group, self.model_buttons = add_model_box(
             self, root, "顔特徴量抽出モデル", visible_extractors(), self.settings["model"], self._on_model_changed)
@@ -191,7 +208,7 @@ class VerifyFaceSizeScreen(QWidget):
             model=self.selected_model(), landmark=self.selected_landmark(), face_gate=gate["report_face_gate"],
             min_eye_ratio=gate["report_min_eye_ratio"], min_crop_side=gate["report_min_crop_side"],
             max_shoulder_reverse=gate["report_max_shoulder_reverse"], grayscale=self.cb_grayscale.isChecked(),
-            align168=self.cb_align168.isChecked())
+            align168=self.cb_align168.isChecked(), angle_model=checked_name(self.angle_buttons))
         save_verify_face_size_settings(self.settings)
 
     # ---- レポート出力 ----
@@ -215,7 +232,7 @@ class VerifyFaceSizeScreen(QWidget):
         self.worker = VerifyFaceSizeWorker(
             track_dirs=[Path(d) for d in dirs], output_dir=Path(self.out_edit.text()),
             model_name=self.selected_model(), landmark_name=self.selected_landmark(), gate_filter=self.gate_row.value(),
-            grayscale=self.cb_grayscale.isChecked(), align168=self.cb_align168.isChecked(), mode=mode,
+            grayscale=self.cb_grayscale.isChecked(), align168=self.cb_align168.isChecked(), mode=mode, angle_model=checked_name(self.angle_buttons),
             camera_dir=Path(self.camera_edit.text()) if self.camera_edit.text() else None,
             camera_image_dir=Path(self.camera_image_edit.text()) if self.camera_image_edit.text() else None, gallery_dir=Path(self.gallery_edit.text()) if self.gallery_edit.text() else None)
         self.worker.progress.connect(self.status.setText)

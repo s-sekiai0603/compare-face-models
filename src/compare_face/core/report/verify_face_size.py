@@ -72,6 +72,44 @@ def sort_entries(entries: list[GalleryEntry]) -> list[GalleryEntry]:
     return sorted(entries, key=key)
 
 
+ANGLE_MODELS = ("6DRepNet", "HopeNet (robust)", "HopeNet (alpha2)", "MediaPipe Face Landmarker")   # 「顔の角度」に使える頭部姿勢モデル
+ANGLE_AVERAGE = "average"   # 顔の角度に、ANGLE_MODELS すべての yaw の平均を出す選択
+ANGLE_OPTIONS = {**{m: m for m in ANGLE_MODELS}, ANGLE_AVERAGE: "すべてのモデルの平均"}   # 選択肢（キー → 画面の表示名）
+
+
+def _assign_angles(entries: list[GalleryEntry], log, angle_model: str = ANGLE_AVERAGE) -> str:
+    """各画像の顔の角度（yaw）を推定して entry.face_angle に入れる。angle_model が ANGLE_MODELS のどれかならそのモデルの値、
+    ANGLE_AVERAGE なら全モデルのうち推定できたものの平均（entry.yaws に各モデルの値も入る）。
+    重みが使えない等で失敗したモデルは使わず、1 つも得られない画像は空欄（「-」）のまま進める。"""
+    import math
+    if angle_model != ANGLE_AVERAGE and angle_model not in ANGLE_MODELS:
+        raise ValueError(f"顔の角度のモデルが不明です: {angle_model}")
+    models = ANGLE_MODELS if angle_model == ANGLE_AVERAGE else (angle_model,)
+    from ..pose import get_pose_estimator
+    from ..pose.mediapipe_pose import MediaPipePoseEstimator
+    from .pipeline import estimate_poses
+    notes = []
+    for name in models:
+        try:
+            est = MediaPipePoseEstimator() if name == "MediaPipe Face Landmarker" else get_pose_estimator(name)
+            if not est.weights_ready():
+                est.download_weights(log=log)
+            for en in entries:
+                en.pose = None
+            estimate_poses(est, entries)
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"{name}: 推定できませんでした（「-」）: {e}")
+            continue
+        for en in entries:
+            if en.pose and not math.isnan(en.pose[0]):   # MediaPipe は顔を検出できないと NaN（「-」のまま）
+                en.yaws[name] = float(en.pose[0])
+        notes.append(f"{name}: {sum(1 for en in entries if name in en.yaws)}/{len(entries)} 枚")
+    for en in entries:
+        vals = [en.yaws[m] for m in models if m in en.yaws]
+        en.face_angle = sum(vals) / len(vals) if vals else None
+    return " / ".join(notes)
+
+
 def sort_info_entries(entries: list[GalleryEntry]) -> list[GalleryEntry]:
     """対象画像情報シートの並び: カメラID → 追跡ID → 映像ファイル名 → 画像ファイル名（いずれも昇順。数字だけの追跡IDは数値順）。"""
     return sorted(entries, key=lambda e: (e.camera_id, _natural(e.track_id), e.video_file, e.face_path.name))
@@ -194,7 +232,7 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
                          gate_filter: GateFilter | None = None, mode: str = "similarity", gallery_dir: Path | str | None = None,
                          progress=lambda s: None, echo=print, grayscale: bool = False,
                          align168: bool = False, camera_dir: Path | str | None = None,
-                         camera_image_dir: Path | str | None = None) -> tuple[Path, PhaseLogger]:
+                         camera_image_dir: Path | str | None = None, angle_model: str = ANGLE_AVERAGE) -> tuple[Path, PhaseLogger]:
     """顔サイズ別精度検証のレポートを出力する（GUI 非依存）。mode は OUTPUT_MODES のキー。
     grayscale=True: アライン後の顔画像に明るさ補正（CLAHE）を掛け、グレースケール化してから特徴量化する（比較対象・検証対象とも。
     キャッシュは別ファイル）。
@@ -202,7 +240,8 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
     誤識別の枚数レポート（misidentify / both）には比較対象フォルダ gallery_dir が必要。
     camera_dir: カメラ設定フォルダ（射影変換設定抽出画面の出力先。<カメラID>.json）。camera_image_dir: カメラ画像フォルダ（<カメラID>.png。距離の算出に使う
     画像サイズをここの画像から取る。指定しなければ camera_dir 内から探す）。指定すると、各画像のカメラIDと足元の座標から
-    カメラ直下までの距離を算出してレポートの「距離」に出す（指定なし・算出できない画像は「-」）。"""
+    カメラ直下までの距離を算出してレポートの「距離」に出す（指定なし・算出できない画像は「-」）。
+    angle_model: 「顔の角度」に出す yaw のモデル（ANGLE_OPTIONS のキー。ANGLE_AVERAGE は全モデルの平均）。"""
     from .verify_face_size_excel import VerifyConditions, build_verify_face_size_report
 
     want_sim, want_mis, want_rank = runs_similarity_report(mode), runs_misidentify_report(mode), runs_rank_report(mode)
@@ -238,6 +277,8 @@ def run_verify_face_size(track_dirs: list[Path | str], output_dir: Path, model_n
         with log.phase("カメラ設定からの距離の算出") as rec:
             rec.note = _assign_distances(entries, Path(camera_dir),
                                          Path(camera_image_dir) if camera_image_dir and str(camera_image_dir).strip() else None)
+    with log.phase("顔の角度（yaw）の推定") as rec:
+        rec.note = _assign_angles(entries, lambda m: (echo(m), progress(m)), angle_model)
     nontargets: list[GalleryEntry] = []
     nt_emb = None
     cache = None

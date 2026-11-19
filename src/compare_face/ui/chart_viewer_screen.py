@@ -11,15 +11,17 @@ from typing import Callable
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QFileDialog, QGroupBox, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGroupBox, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
+from ..core.report.angle_chart import AngleOverlay
+from ..core.report.chart_summary import DistanceRange
 from ..core.report.chart_png_viewer import (
     ALL_CAMERAS, HEATMAP_CACHE_DIR, ChartOverlay, ChartPngIndex, HeatmapOverlay, camera_display, on_white, overlay_png_path, scan_chart_pngs, select_paths, write_png,
 )
 from ..core.report.distance_pose_chart import COLOR_GROUPS, ICON_DIR, color_group_rgb, icon_choices
-from .chart_summary_screen import ChartSummaryScreen
+from .chart_summary_screen import ChartSummaryScreen, RangeRow
 from .widgets import add_check_list, add_path_row, checked_values, fixed_label, item_values, swatch_icon
 
 TITLE = "チャート(PNG)確認"
@@ -112,6 +114,7 @@ class ChartViewerScreen(QWidget):
         self.index = ChartPngIndex({})
         self.icon_overlay = ChartOverlay()
         self.heat_overlay = HeatmapOverlay()
+        self.angle_overlay = AngleOverlay()
         self.overlay = self.icon_overlay      # 表示中のモードの合成器
         self._worker: _ComposeWorker | None = None
         self._pending = False
@@ -202,9 +205,16 @@ class ChartViewerScreen(QWidget):
         (self.rb_heat if self.settings.get("viewer_display_mode") == "heatmap" else self.rb_icon).setChecked(True)
         mode_lay.addWidget(self.rb_icon)
         mode_lay.addWidget(self.rb_heat)
+        self.cb_angle = QCheckBox("顔角度の組合せ表示")
+        self.cb_angle.setToolTip("指定した Excel レポートから、基準の顔画像の顔角度（縦軸）× 比較対象の顔角度（横軸）の組合せに、精度の色の点と"
+                                 "加重平均のヒートマップを表示する。ONのときは PNG を使わない（出力対象のカメラ・対象の色・並び順は使う）")
+        self.cb_angle.setChecked(bool(self.settings.get("angle_mode")))
+        mode_lay.addWidget(self.cb_angle)
         mode_lay.addStretch()
         side.addWidget(mode_box)
         self.rb_heat.toggled.connect(lambda _c: self._mark_dirty())
+        self._build_angle_box(side)
+        self.cb_angle.toggled.connect(self._on_angle_toggled)
 
         self.btn_apply = QPushButton("条件確定（表示を更新）")
         self.btn_apply.setToolTip("上の条件（出力対象・対象カメラ・対象の色・対象のアイコン・並び順・表示モード）で PNG を重ねて表示する。条件を変えただけでは表示は変わらない")
@@ -242,7 +252,112 @@ class ChartViewerScreen(QWidget):
         self.excel_combo.currentIndexChanged.connect(self._on_excel_changed)
         self.rb_all.toggled.connect(self._on_target_changed)
         self.cam_list.currentRowChanged.connect(lambda _row: self._mark_dirty())
+        self._update_angle_enabled()
         self._rescan()      # 開いたときと格納先を変えたときは、読み込み直した内容を表示する（条件の変更とは別）
+
+    # ---- 顔角度の組合せ表示 ----
+    def _build_angle_box(self, side: QVBoxLayout) -> None:
+        """顔角度の組合せ表示の入力: Excel と、距離のフィルタ（集計画面の「集計範囲の距離」と同じ指定。縦 = 基準の顔画像、横 = 比較対象）。"""
+        self.angle_box = QGroupBox("顔角度の組合せ表示の条件")
+        lay = QVBoxLayout(self.angle_box)
+        self.angle_excel_edit = QLineEdit(self.settings.get("angle_excel_path") or self.settings.get("summary_excel_path")
+                                          or self.settings.get("excel_path") or "")
+        self.angle_excel_edit.setReadOnly(True)
+        add_path_row(lay, "Excel:", self.angle_excel_edit, self._pick_angle_excel)
+        self.cb_angle_filter = QCheckBox("カメラからの距離で絞り込む（縦 = 基準の顔画像、横 = 比較対象の顔画像）")
+        self.cb_angle_filter.setChecked(bool(self.settings.get("angle_filter")))
+        lay.addWidget(self.cb_angle_filter)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(fixed_label("集計範囲の距離:", 100))
+        self.rb_angle_both = QRadioButton("縦横を合わせて指定")
+        self.rb_angle_sep = QRadioButton("縦横を別々に指定")
+        self.rb_angle_both.setToolTip("基準の画像・比較対象の画像の距離がどちらも同じ範囲に入る組合せだけを表示する")
+        self.rb_angle_sep.setToolTip("基準の画像の距離（縦）と比較対象の画像の距離（横）に、別々の範囲を指定する")
+        grp = QButtonGroup(self)
+        grp.addButton(self.rb_angle_both)
+        grp.addButton(self.rb_angle_sep)
+        (self.rb_angle_sep if self.settings.get("angle_separate") else self.rb_angle_both).setChecked(True)
+        mode_row.addWidget(self.rb_angle_both)
+        mode_row.addWidget(self.rb_angle_sep)
+        mode_row.addStretch()
+        lay.addLayout(mode_row)
+        saved = self.settings.get("angle_ranges") or []
+        self.angle_ranges = [RangeRow("範囲 1", saved[0] if len(saved) > 0 else None, False),
+                             RangeRow("範囲 2", saved[1] if len(saved) > 1 else None, True)]
+        self.angle_ranges[1].use.setChecked(bool(self.settings.get("angle_use_range2")))
+        for rr in self.angle_ranges:
+            lay.addWidget(rr)
+        lay.addWidget(QLabel("※ 範囲を 2 つ指定したときは、どちらかに入る組合せを合算して表示する"))
+        side.addWidget(self.angle_box)
+        self.rb_angle_sep.toggled.connect(self._update_angle_range_mode)
+        self.cb_angle_filter.toggled.connect(self._update_angle_enabled)
+        for w in (self.cb_angle_filter, self.rb_angle_sep, self.angle_ranges[0].use, self.angle_ranges[1].use):
+            w.toggled.connect(lambda _c: self._mark_dirty())
+        for rr in self.angle_ranges:
+            for sp in rr.spins:
+                sp.valueChanged.connect(lambda _v: self._mark_dirty())
+        self._update_angle_range_mode()
+
+    def _update_angle_range_mode(self) -> None:
+        for rr in self.angle_ranges:
+            rr.set_separate(self.rb_angle_sep.isChecked())
+
+    def _angle_ranges(self) -> list[DistanceRange] | None:
+        """距離のフィルタ（かけないときは None）。"""
+        if not self.cb_angle_filter.isChecked():
+            return None
+        sep = self.rb_angle_sep.isChecked()
+        return [rr.value(sep) for rr in self.angle_ranges if rr.used()]
+
+    def _update_angle_enabled(self) -> None:
+        """顔角度の組合せ表示の ON / OFF と距離フィルタの有無に合わせて、使えない入力を無効にする。"""
+        on = self.cb_angle.isChecked()
+        self.angle_box.setVisible(on)
+        filt = self.cb_angle_filter.isChecked()
+        for w in (self.rb_angle_both, self.rb_angle_sep, *self.angle_ranges):
+            w.setEnabled(filt)
+        if filt:
+            for rr in self.angle_ranges:
+                rr._enable()
+        for w in (self.excel_combo, self.icon_list, self.rb_icon, self.rb_heat):    # PNG・アイコン・表示方式は顔角度の組合せ表示では使わない
+            w.setEnabled(not on)
+
+    def _on_angle_toggled(self) -> None:
+        self._update_angle_enabled()
+        if self.cb_angle.isChecked():
+            self._fill_angle_cameras()
+        else:
+            self._rebuild_cameras()
+        self._mark_dirty()
+
+    def _pick_angle_excel(self) -> None:
+        start = self.angle_excel_edit.text() or ""
+        f, _ = QFileDialog.getOpenFileName(self, "顔角度の組合せ表示に使う Excel を選択", start, "Excel (*.xlsx *.xlsm)")
+        if f:
+            self.angle_excel_edit.setText(f)
+            self.settings["angle_excel_path"] = f
+            self._persist()
+            self._mark_dirty()
+
+    def _fill_angle_cameras(self) -> None:
+        """読み込み済みの Excel のカメラIDを対象カメラの一覧にする（まだ読んでいなければ空。「条件確定」で読む）。"""
+        data = self.angle_overlay.data
+        cams = list(data.cameras) if data is not None else []
+        cur = self.cam_list.currentItem().data(Qt.UserRole) if self.cam_list.currentItem() is not None else None
+        self.cam_list.blockSignals(True)
+        self.cam_list.clear()
+        for cam in cams:
+            it = QListWidgetItem(camera_display(cam))
+            it.setData(Qt.UserRole, cam)
+            self.cam_list.addItem(it)
+        if self.cam_list.count():
+            self.cam_list.setCurrentRow(cams.index(cur) if cur in cams else 0)
+        self.cam_list.blockSignals(False)
+        self.rb_all.setEnabled(True)
+        self.rb_each.setEnabled(self.cam_list.count() > 0)
+        if self.rb_each.isChecked() and not self.rb_each.isEnabled():
+            self.rb_all.setChecked(True)
+        self._update_camera_enabled()
 
     # ---- 格納先・一覧 ----
     def _pick_dir(self) -> None:
@@ -266,7 +381,8 @@ class ChartViewerScreen(QWidget):
             return
         cams = self._selected_cameras()
         start_dir = self.settings.get("viewer_out_dir") or self.dir_edit.text()
-        default = overlay_png_path(start_dir or ".", self.excel_combo.currentText(), cams[0] if cams else "")
+        excel_name = Path(self.angle_excel_edit.text()).stem + "_顔角度" if self.overlay is self.angle_overlay else self.excel_combo.currentText()
+        default = overlay_png_path(start_dir or ".", excel_name, cams[0] if cams else "")
         chosen, _ = QFileDialog.getSaveFileName(self, "重ねた画像の保存先を指定", str(default), "PNG (*.png)")
         if not chosen:
             return
@@ -297,6 +413,9 @@ class ChartViewerScreen(QWidget):
 
     def _rebuild_cameras(self) -> None:
         """選んだ Excel 名に合わせて、対象カメラの一覧と出力対象（ラジオ）の選べる状態を作る。表示は更新しない。"""
+        if self.cb_angle.isChecked():
+            self._fill_angle_cameras()
+            return
         name = self.excel_combo.currentText()
         self.cam_list.blockSignals(True)
         self.cam_list.clear()
@@ -343,6 +462,9 @@ class ChartViewerScreen(QWidget):
         name = self.excel_combo.currentText()
         colors, _ = checked_values(self.color_list)
         icons, _ = checked_values(self.icon_list)
+        if self.cb_angle.isChecked():
+            self._refresh_angle(colors, icons)
+            return
         self.heat_overlay.cache_dir = Path(self.dir_edit.text()) / HEATMAP_CACHE_DIR if self.dir_edit.text() else None
         self.overlay = self.heat_overlay if self.rb_heat.isChecked() else self.icon_overlay
         paths, missing = select_paths(self.index, name, self._selected_cameras(), colors, icons)     # colors / icons は上にあるものほど手前
@@ -362,11 +484,34 @@ class ChartViewerScreen(QWidget):
             self.status.setText(self.status.text() + "　合成中...")
         self._worker.start()
 
+    def _refresh_angle(self, colors: list, icons: list) -> None:
+        """顔角度の組合せ表示: 指定した Excel から点を読み、距離で絞り込んで描く（別スレッド。Excel は更新されていなければ読み直さない）。"""
+        path = self.angle_excel_edit.text()
+        if not path or not Path(path).is_file():
+            self.status.setText("顔角度の組合せ表示に使う Excel を指定してください（ファイルが見つかりません）。")
+            return
+        ranges = self._angle_ranges()
+        if ranges is not None and not ranges:
+            self.status.setText("距離の範囲を 1 つ以上指定してください。")
+            return
+        cams = self._selected_cameras()
+        self.angle_overlay.configure(path, None if not cams or cams[0] == ALL_CAMERAS else cams[0], colors, ranges)
+        self.overlay = self.angle_overlay
+        self._persist_selection(colors, icons)
+        self.btn_export.setEnabled(False)
+        self.status.setText("Excel を読み込んで描画中...")
+        worker = self._worker = _ComposeWorker(self.overlay, [])
+        worker.done.connect(self._on_composed)
+        worker.failed.connect(self._on_failed)
+        worker.finished.connect(self._on_thread_finished)
+        self._set_busy(True)
+        worker.start()
+
     def _set_busy(self, busy: bool) -> None:
         """処理中の表示: 砂時計（待機カーソル）+ 動き続けるバー。「条件確定」は処理中は押せない。"""
         if busy:
             self.busy_bar.setRange(0, 0)
-            self.busy_bar.setFormat("PNG を読み込んで重ねています...")
+            self.busy_bar.setFormat("Excel を読み込んで描画しています..." if self.cb_angle.isChecked() else "PNG を読み込んで重ねています...")
         if busy != self._busy:
             self._busy = busy
             if busy:
@@ -378,7 +523,7 @@ class ChartViewerScreen(QWidget):
 
     def _on_progress(self, done: int, total: int) -> None:
         """枚数が分かったら進み具合（n / 枚数）を出す。0 枚目は読み込み中なので動き続ける表示のまま。"""
-        if total > 0 and done > 0:
+        if total > 0 and done > 0 and not self.cb_angle.isChecked():
             self.busy_bar.setRange(0, total)
             self.busy_bar.setValue(done)
             self.busy_bar.setFormat(f"重ねています... {done} / {total} 枚")
@@ -390,6 +535,10 @@ class ChartViewerScreen(QWidget):
         self.view.set_image(pil_to_qimage(on_white(im)) if im is not None else None, fit=self._fit_next and im is not None)
         if im is not None:
             self._fit_next = False
+        if self.overlay is self.angle_overlay:
+            self.status.setText(self.angle_overlay.message)
+            self._fill_angle_cameras()
+            return
         self.status.setText(self.status.text().replace("　合成中...", ""))
 
     def _on_failed(self, msg: str) -> None:
@@ -410,6 +559,12 @@ class ChartViewerScreen(QWidget):
         self.settings["viewer_excluded_colors"] = [g for g in range(len(COLOR_GROUPS)) if g not in colors]
         self.settings["viewer_excluded_icons"] = [f for _, f in icon_choices() if f not in icons]
         self.settings["viewer_display_mode"] = "heatmap" if self.rb_heat.isChecked() else "icon"
+        self.settings["angle_mode"] = self.cb_angle.isChecked()
+        self.settings["angle_excel_path"] = self.angle_excel_edit.text()
+        self.settings["angle_filter"] = self.cb_angle_filter.isChecked()
+        self.settings["angle_separate"] = self.rb_angle_sep.isChecked()
+        self.settings["angle_ranges"] = [rr.raw() for rr in self.angle_ranges]
+        self.settings["angle_use_range2"] = self.angle_ranges[1].used()
         self.settings["viewer_color_order"] = item_values(self.color_list)
         self.settings["viewer_icon_order"] = item_values(self.icon_list)
         self._persist()

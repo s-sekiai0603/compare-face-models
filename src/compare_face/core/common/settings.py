@@ -82,6 +82,7 @@ VERIFY_FACE_SIZE_DEFAULTS = {
     "max_shoulder_reverse": 0.0,
     "grayscale": False,               # 特徴量抽出前に顔画像をグレースケール化する
     "align168": False,                # 168×168 でアラインしてから 112×112 に縮小して特徴量化する
+    "angle_model": "average",         # 顔の角度（yaw）に使う頭部姿勢モデル（モデル名 / "average" = 全モデルの平均）
 }
 
 
@@ -149,6 +150,12 @@ DISTANCE_POSE_CHART_DEFAULTS = {
     "excluded_icons": [],    # 出力対象から外したアイコンのファイル名（それ以外は対象）
     "excluded_cameras": [],  # カメラIDのリストで、チェックを外したカメラID（それ以外は対象）
     "viewer_dir": "",        # チャート(PNG)ビューアの PNG の格納先（空 = 「PNG の出力先」）
+    "angle_mode": False,     # ビューア: 顔角度の組合せ表示
+    "angle_excel_path": "",  # 顔角度の組合せ表示の Excel（空 = 「summary_excel_path」→「excel_path」を初期値にする）
+    "angle_filter": False,   # 顔角度の組合せ表示: 距離で絞り込む
+    "angle_separate": False, # 顔角度の組合せ表示: 距離範囲を縦（基準）と横（比較対象）で別々に指定する
+    "angle_ranges": [[0.0, 10.0, 0.0, 10.0], [0.0, 10.0, 0.0, 10.0]],   # 範囲 1・2 の [縦の下限, 縦の上限, 横の下限, 横の上限](m)
+    "angle_use_range2": False,   # 範囲 2 も使う（範囲 1 と合算）
     "viewer_out_dir": "",    # ビューアで重ねた画像の PNG の出力先フォルダ
     "viewer_color_order": [],   # ビューアの対象の色の並び順（色の段階の番号。上ほど手前。空 = 既定の順）
     "viewer_icon_order": [],    # ビューアの対象のアイコンの並び順（ファイル名。上ほど手前）
